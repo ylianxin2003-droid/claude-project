@@ -7,7 +7,6 @@ SERENE API is primary; local JSON sample file is the automatic fallback.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,12 +78,14 @@ def load_data(
     grid_step: float = 10.0,
     progress_callback: Any | None = None,
 ) -> tuple[pd.DataFrame, LoadStatus]:
-    """Load ionospheric data from SERENE API or a local sample file.
+    """Load ionospheric data from SERENE API.
+
+    Local file mode is disabled — this project uses SERENE API only.
 
     Parameters
     ----------
     source : str
-        ``"api"`` or ``"local"``.
+        ``"api"`` (default). ``"local"`` returns an empty DataFrame with a warning.
     model : str
         ``"AIDA"`` or ``"TOMIRIS"``.
     start_time, end_time : str, optional
@@ -94,110 +95,70 @@ def load_data(
     region : dict, optional
         ``{"lat_min", "lat_max", "lon_min", "lon_max"}``.
     local_file : str or Path, optional
-        Fallback JSON path.
+        Ignored — local file mode is disabled.
     grid_step : float
-        Grid spacing (degrees) for point-sampling fallback.
+        Grid spacing (degrees) for point-sampling.
 
     Returns
     -------
     tuple[pd.DataFrame, LoadStatus]
         Standardised data and a status object describing the outcome.
     """
-    local_path = resolve_local_file(local_file)
     status = LoadStatus()
-    api_warnings: list[str] = []
 
-    if source == "api":
-        client = SereneClient()
-        r = region or {
-            "lat_min": -90.0,
-            "lat_max": 90.0,
-            "lon_min": -180.0,
-            "lon_max": 180.0,
-        }
-
-        ok, msg, raw = client.fetch_model_output(
-            model=model,
-            start_time=start_time or "",
-            end_time=end_time or "",
-            variables=variables,
-            region=r,
-            grid_step=grid_step,
-            progress_callback=progress_callback,
-        )
-
-        if not ok:
-            api_warnings.append(msg)
-        elif raw is not None:
-            df = client.parse_response_to_dataframe(raw, model=model)
-            if variables and not df.empty and "variable" in df.columns:
-                df = df[df["variable"].isin(variables)]
-
-            if not df.empty:
-                status.source = "api"
-                status.ok = True
-                status.message = f"API connected — {len(df)} rows loaded from SERENE."
-                status.metadata = {"model": model, "api_message": msg}
-                return df, status
-
-            api_warnings.append(msg or "API returned empty or unparseable data.")
-        else:
-            api_warnings.append(msg or "API returned no data.")
-
-        status.warnings.extend(api_warnings)
-
-    # ── Local path (explicit or fallback) ───────────────────────────────────
-    if not local_path.exists():
+    # ── Local mode is disabled ─────────────────────────────────────────────
+    if source == "local":
         status.source = "none"
         status.ok = False
-        if source == "api":
-            status.message = (
-                "API failed, using local fallback — local file not found. "
-                "No data available."
-            )
-        else:
-            status.message = "Local file not found. No data available."
+        status.message = "Local file mode is disabled. This project uses SERENE API only."
         return pd.DataFrame(), status
 
-    try:
-        with local_path.open("r", encoding="utf-8") as fh:
-            product = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
-        status.source = "none"
+    # ── API mode ───────────────────────────────────────────────────────────
+    client = SereneClient()
+    r = region or {
+        "lat_min": -90.0,
+        "lat_max": 90.0,
+        "lon_min": -180.0,
+        "lon_max": 180.0,
+    }
+
+    ok, msg, raw = client.fetch_model_output(
+        model=model,
+        start_time=start_time or "",
+        end_time=end_time or "",
+        variables=variables,
+        region=r,
+        grid_step=grid_step,
+        progress_callback=progress_callback,
+    )
+
+    if not ok:
+        status.source = "api"
         status.ok = False
-        status.message = f"Cannot read local file: {exc}"
-        status.warnings.append(str(exc))
+        status.message = msg or "SERENE API request failed."
+        status.warnings.append(msg)
         return pd.DataFrame(), status
 
-    df = _parse_aida_grid_json(product, model=model)
+    if raw is None:
+        status.source = "api"
+        status.ok = False
+        status.message = msg or "SERENE API returned no data."
+        return pd.DataFrame(), status
+
+    df = client.parse_response_to_dataframe(raw, model=model)
     if variables and not df.empty and "variable" in df.columns:
         df = df[df["variable"].isin(variables)]
 
-    meta = product.get("metadata", {})
-    status.metadata = meta
-
     if df.empty:
-        status.source = "none"
+        status.source = "api"
         status.ok = False
-        status.message = "Local file loaded but contained no usable data."
+        status.message = msg or "SERENE API returned empty or unparseable data."
         return pd.DataFrame(), status
 
-    if source == "api":
-        status.source = "local_fallback"
-        status.ok = True
-        warn = api_warnings[0][:120] if api_warnings else "API unavailable"
-        status.message = (
-            f"API failed ({warn}), using local fallback — "
-            f"{len(df)} rows from {meta.get('model_time', 'unknown time')}."
-        )
-    else:
-        status.source = "local"
-        status.ok = True
-        status.message = (
-            f"Local file loaded — {len(df)} rows from "
-            f"{meta.get('model_time', 'unknown time')}."
-        )
-
+    status.source = "api"
+    status.ok = True
+    status.message = f"API connected — {len(df)} rows loaded from SERENE."
+    status.metadata = {"model": model, "api_message": msg}
     return df, status
 
 

@@ -11,7 +11,6 @@ risk advisories** for academic demonstration.
 - **All Variables Overview** — auto-discovers every variable from SERENE/AIDA and displays summary statistics, per-variable maps, and normalised time series for all variables simultaneously
 - **Dynamic variable discovery** — variables are detected from current DataFrame, local JSON keys, or SERENE `/api/variables/` endpoint with a hardcoded fallback registry
 - **SERENE API integration** — official `POST /api/calc/` with `Authorization: Token <token>`
-- **Local sample fallback** — bundled JSON grid data works without any API configuration
 - **2.5° fixed grid maps** — configurable resolution with global and regional grids
 - **Map caching** — automatic Parquet/CSV cache in `data/cache/` to avoid repeated API calls
 - **Hazard detection** — spatial gradient and temporal change rate analysis with configurable thresholds
@@ -25,24 +24,23 @@ risk advisories** for academic demonstration.
 ## Architecture
 
 ```
-SERENE API (/api/calc/)          Local sample JSON
-         │                              │
-         └──────────┬───────────────────┘
-                    ▼
-         fixed grid generation   (grid_generator.py)
+SERENE API (/api/calc/)
+         │
+         ▼
+ fixed grid generation   (grid_generator.py)
+         │
+         ▼
+ map building            (map_builder.py)
+         │
+ ┌───────┴───────┐
+ ▼               ▼
+map cache     hazard detection   (hazard_detector.py)
+(map_cache.py)      │
+         │          ▼
+         └──► alert generation   (alert_engine.py)
                     │
                     ▼
-         map building            (map_builder.py)
-                    │
-         ┌──────────┴──────────┐
-         ▼                     ▼
-    map cache             hazard detection   (hazard_detector.py)
- (map_cache.py)                │
-         │                     ▼
-         └──────────►  alert generation      (alert_engine.py)
-                              │
-                              ▼
-                    Streamlit dashboard      (app.py)
+          Streamlit dashboard    (app.py)
 ```
 
 ### File map
@@ -52,7 +50,7 @@ SERENE API (/api/calc/)          Local sample JSON
 | `app.py` | Streamlit entry point — sidebar + 3 modes |
 | `config.py` | Settings, env/secrets loading, thresholds |
 | `serene_client.py` | SERENE API client (`POST /api/calc/`) |
-| `data_loader.py` | Unified data loader (API + local fallback) |
+| `data_loader.py` | SERENE API data loader (local mode disabled) |
 | `grid_generator.py` | Fixed-grid lat/lon point generator (6 regions) |
 | `map_builder.py` | Builds fixed maps from grid + API + cache |
 | `map_cache.py` | Disk cache layer (Parquet / CSV fallback) |
@@ -113,8 +111,8 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-Without a SERENE token the dashboard still works — it auto-loads the bundled
-sample data on first visit.
+A valid `SERENE_API_TOKEN` is required for live API access.
+Cached maps may be used when available. Local sample fallback is disabled.
 
 ---
 
@@ -143,6 +141,9 @@ timestamp, resolution, and region.  This directory is listed in `.gitignore`
 and **should not be committed to GitHub**.  Delete it at any time — it will
 be recreated on the next run.
 
+Sample JSON files (`data/latest_aida_grid.json`, `data/test_aida_grid.json`)
+are not used by the current API-only workflow and are kept as legacy references.
+
 ---
 
 ## Alert disclaimer
@@ -159,6 +160,7 @@ operational aviation decision-making.
 - SERENE `/api/calc/` is point-based; there is no batch endpoint at this time
 - Global 2.5° grids require ~10,500 API calls — use small regions or cached data
 - Historical analysis depends on API availability or pre-cached maps
+- This project uses SERENE API only — local sample fallback is disabled
 - Radiation hazard is **not assessed**
 - Scintillation is **not assessed** unless future model output explicitly supports it
 - The `MAX_GRID_POINTS` default (30) limits live API grid size; increase via `SERENE_MAX_GRID_POINTS` env var

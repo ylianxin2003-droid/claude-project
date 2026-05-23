@@ -171,7 +171,8 @@ def validate_config() -> list[str]:
     if not SERENE_API_TOKEN:
         messages.append(
             "SERENE_API_TOKEN is not set. "
-            "Without it, SERENE API mode falls back to the local sample file."
+            "This dashboard requires SERENE API access or existing cache. "
+            "Local sample fallback is disabled."
         )
 
     return messages
