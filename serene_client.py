@@ -397,7 +397,11 @@ class SereneClient:
         response_data: Any,
         model: str | None = None,
     ) -> pd.DataFrame:
-        """Convert API JSON into the standard long-form schema."""
+        """Convert API JSON into the standard long-form schema.
+
+        When ``/api/calc/`` returns multiple variables in a single response,
+        every variable is expanded into its own row.
+        """
         if response_data is None:
             logger.warning("parse_response_to_dataframe received None.")
             return pd.DataFrame()
@@ -440,6 +444,12 @@ class SereneClient:
                 except (ValueError, TypeError):
                     pass
                 break
+
+        # Ensure standard columns exist and are never NaN.
+        for col in ("unit", "description"):
+            if col not in df.columns:
+                df[col] = ""
+            df[col] = df[col].fillna("")
 
         return df
 
@@ -552,6 +562,8 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
         "field": "variable",
         "val": "value",
         "data_value": "value",
+        "units": "unit",
+        "desc": "description",
     }
     rename = {k: v for k, v in mapping.items() if k in df.columns and v not in df.columns}
     return df.rename(columns=rename)
