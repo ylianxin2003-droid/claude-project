@@ -214,6 +214,8 @@ def _parse_aida_grid_json(product: dict[str, Any], model: str = "AIDA") -> pd.Da
     for var_name, var_info in vars_dict.items():
         if not isinstance(var_info, dict):
             continue
+        var_unit = var_info.get("units", "")
+        var_desc = var_info.get("description", "")
         values = var_info.get("values", [])
         for ilat, lat in enumerate(lats):
             if ilat >= len(values):
@@ -230,6 +232,8 @@ def _parse_aida_grid_json(product: dict[str, Any], model: str = "AIDA") -> pd.Da
                     "variable": var_name,
                     "value": row_vals[ilon],
                     "model": model,
+                    "unit": var_unit,
+                    "description": var_desc,
                 })
 
     return pd.DataFrame(rows)

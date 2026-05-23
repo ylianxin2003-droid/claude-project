@@ -267,6 +267,28 @@ def detect_hazards_from_map(
         time_val = grp["time"].iloc[0] if "time" in grp.columns else "unknown"
 
         hazard_type = _hazard_type_for(var_val)
+        cfg = _find_hazard_config(var_val, thresholds or HAZARD_THRESHOLDS)
+
+        if cfg is None:
+            # No prototype threshold configured — monitoring summary only.
+            hazards.append({
+                "timestamp": time_val,
+                "region": region_val,
+                "variable": var_val,
+                "hazard_type": "General ionospheric monitoring",
+                "risk_level": "Normal",
+                "reason": (
+                    f"{var_val} max = {max_val:.2f}; "
+                    "No prototype hazard threshold configured; monitoring summary only."
+                ),
+                "max_value": max_val,
+                "mean_value": mean_val,
+                "max_gradient": max_grad,
+                "max_change_rate": max_change,
+                "model": model_val,
+            })
+            continue
+
         risk = _classify_from_thresholds(max_val, max_grad, max_change, var_val, thresholds)
 
         if risk == "Normal":

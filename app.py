@@ -37,7 +37,11 @@ from visualisation import (
     create_hazard_map_plot,
     create_historical_summary_plot,
     create_map_plot,
+    create_multi_variable_time_series,
     create_time_series_plot,
+    create_variable_card_data,
+    create_variable_map_grid,
+    create_variable_summary_table,
 )
 
 st.set_page_config(
@@ -89,6 +93,8 @@ if "available_variables" not in st.session_state:
     st.session_state.available_variables = discover_variables()
 if "available_variable_metadata" not in st.session_state:
     st.session_state.available_variable_metadata = {}
+if "show_all_variables" not in st.session_state:
+    st.session_state.show_all_variables = True
 
 # Auto-load bundled sample data on first visit.
 if "bootstrap_done" not in st.session_state:
@@ -232,13 +238,25 @@ def _render_existing_sidebar() -> dict:
         value=now.strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
-    avail_vars = st.session_state.available_variables
-    selected_vars = st.sidebar.multiselect(
-        "Variable selection",
-        options=avail_vars,
-        default=avail_vars,
+    st.sidebar.markdown("#### Variable selection")
+    show_all = st.sidebar.checkbox(
+        "Show all variables",
+        value=st.session_state.show_all_variables,
+        help="Load and display all available variables from the data source.",
     )
-    params["variables"] = selected_vars or None
+    st.session_state.show_all_variables = show_all
+
+    avail_vars = st.session_state.available_variables
+    if show_all:
+        params["variables"] = None  # signal: load all
+        st.sidebar.caption(f"Loading all {len(avail_vars)} variable(s).")
+    else:
+        selected_vars = st.sidebar.multiselect(
+            "Select variables",
+            options=avail_vars,
+            default=avail_vars[:1],
+        )
+        params["variables"] = selected_vars or None
 
     st.sidebar.markdown("#### Region selection (API mode)")
     with st.sidebar.expander("Bounding box & grid step", expanded=params["source"] == "api"):
@@ -331,11 +349,26 @@ def _render_live_sidebar() -> dict:
     params: dict = {"mode": "live"}
 
     params["model"] = st.sidebar.selectbox("Model", ["AIDA", "TOMIRIS"], key="live_model")
-    params["variable"] = st.sidebar.selectbox(
-        "Variable",
-        st.session_state.available_variables,
-        key="live_var",
+
+    # Variable selection — support show all
+    show_all_live = st.sidebar.checkbox(
+        "Show all variables",
+        value=st.session_state.show_all_variables,
+        key="live_show_all",
     )
+    st.session_state.show_all_variables = show_all_live
+    if show_all_live:
+        params["variables"] = None  # build all
+        st.sidebar.caption(f"Will build {len(st.session_state.available_variables)} variable(s).")
+    else:
+        params["variables"] = [
+            st.sidebar.selectbox(
+                "Variable",
+                st.session_state.available_variables,
+                key="live_var",
+            )
+        ]
+
     params["region"] = st.sidebar.selectbox(
         "Region",
         list_regions(),
@@ -374,46 +407,64 @@ def _render_live_sidebar() -> dict:
 
 
 def _build_live_map(params: dict) -> None:
-    with st.spinner("Building fixed map…"):
-        try:
-            map_df, msg = build_fixed_map(
-                model=params["model"],
-                timestamp=params["timestamp"],
-                variable=params["variable"],
-                region=params["region"],
-                resolution=params["resolution"],
-                use_cache=params["use_cache"],
-                force_refresh=params["force_refresh"],
-            )
-        except Exception as exc:
-            st.error(f"build_fixed_map failed: {exc}")
-            return
+    variables = params.get("variables")
+    if variables is None:
+        variables = st.session_state.available_variables
+    if isinstance(variables, str):
+        variables = [variables]
 
-        st.session_state.live_map_df = map_df
-        st.session_state.live_map_status = msg
+    all_frames: list[pd.DataFrame] = []
+    messages: list[str] = []
 
-        if map_df.empty:
-            st.session_state.live_hazards = pd.DataFrame()
-            st.session_state.live_alerts = pd.DataFrame()
-            st.warning(f"Map is empty: {msg}")
-            return
+    with st.spinner(f"Building fixed map(s) for {len(variables)} variable(s)…"):
+        for var in variables:
+            try:
+                map_df, msg = build_fixed_map(
+                    model=params["model"],
+                    timestamp=params["timestamp"],
+                    variable=var,
+                    region=params["region"],
+                    resolution=params["resolution"],
+                    use_cache=params["use_cache"],
+                    force_refresh=params["force_refresh"],
+                )
+            except Exception as exc:
+                st.warning(f"build_fixed_map failed for {var}: {exc}")
+                continue
+            if not map_df.empty:
+                all_frames.append(map_df)
+            messages.append(f"{var}: {msg}")
 
-        try:
-            hazards = detect_hazards_from_map(
-                current_map=map_df,
-                previous_map=None,
-                variable=params["variable"],
-            )
-        except Exception as exc:
-            st.warning(f"Hazard detection failed: {exc}")
-            hazards = pd.DataFrame()
+    if all_frames:
+        combined = pd.concat(all_frames, ignore_index=True)
+    else:
+        combined = pd.DataFrame()
 
-        st.session_state.live_hazards = hazards
+    st.session_state.live_map_df = combined
+    st.session_state.live_map_status = "; ".join(messages) if messages else "No maps built."
 
-        if not hazards.empty:
-            st.session_state.live_alerts = generate_alerts_from_hazards(hazards)
-        else:
-            st.session_state.live_alerts = pd.DataFrame()
+    if combined.empty:
+        st.session_state.live_hazards = pd.DataFrame()
+        st.session_state.live_alerts = pd.DataFrame()
+        st.warning("All maps are empty. Check API connectivity or cache.")
+        return
+
+    try:
+        hazards = detect_hazards_from_map(
+            current_map=combined,
+            previous_map=None,
+            variable=None,  # all variables
+        )
+    except Exception as exc:
+        st.warning(f"Hazard detection failed: {exc}")
+        hazards = pd.DataFrame()
+
+    st.session_state.live_hazards = hazards
+
+    if not hazards.empty:
+        st.session_state.live_alerts = generate_alerts_from_hazards(hazards)
+    else:
+        st.session_state.live_alerts = pd.DataFrame()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -429,11 +480,28 @@ def _render_historical_sidebar() -> dict:
     params: dict = {"mode": "historical"}
 
     params["model"] = st.sidebar.selectbox("Model", ["AIDA", "TOMIRIS"], key="hist_model")
-    params["variable"] = st.sidebar.selectbox(
-        "Variable",
-        st.session_state.available_variables,
-        key="hist_var",
+
+    show_all_hist = st.sidebar.checkbox(
+        "Show all variables",
+        value=False,
+        key="hist_show_all",
+        help="Run analysis on all available variables. ⚠️ This can be very slow without cache.",
     )
+    if show_all_hist:
+        st.sidebar.warning(
+            "⚠️ Running historical analysis on ALL variables can take a long time. "
+            "Consider selecting 1–2 variables or using cached data."
+        )
+        params["variables"] = None
+    else:
+        params["variables"] = [
+            st.sidebar.selectbox(
+                "Variable",
+                st.session_state.available_variables,
+                key="hist_var",
+            )
+        ]
+
     params["region"] = st.sidebar.selectbox(
         "Region",
         list_regions(),
@@ -515,22 +583,64 @@ def _render_historical_sidebar() -> dict:
 
 
 def _run_historical(params: dict) -> None:
-    with st.spinner("Running historical analysis…"):
-        try:
-            maps_meta, hazards_df, alerts_df, summary = run_historical_analysis(
-                model=params["model"],
-                variable=params["variable"],
-                start_time=params["start_time"],
-                end_time=params["end_time"],
-                time_step_hours=params["time_step"],
-                region=params["region"],
-                resolution=params["resolution"],
-                use_cache=params["use_cache"],
-                force_refresh=params["force_refresh"],
-            )
-        except Exception as exc:
-            st.error(f"Historical analysis failed: {exc}")
-            return
+    variables = params.get("variables")
+    if variables is None:
+        variables = st.session_state.available_variables
+    if isinstance(variables, str):
+        variables = [variables]
+
+    all_hazards: list[pd.DataFrame] = []
+    all_alerts: list[pd.DataFrame] = []
+    all_maps_meta: list[dict] = []
+    total_maps = 0
+    total_cache = 0
+    total_fail = 0
+    all_messages: list[str] = []
+
+    for var in variables:
+        with st.spinner(f"Running historical analysis for {var}…"):
+            try:
+                maps_meta, hazards_df, alerts_df, summary = run_historical_analysis(
+                    model=params["model"],
+                    variable=var,
+                    start_time=params["start_time"],
+                    end_time=params["end_time"],
+                    time_step_hours=params["time_step"],
+                    region=params["region"],
+                    resolution=params["resolution"],
+                    use_cache=params["use_cache"],
+                    force_refresh=params["force_refresh"],
+                )
+            except Exception as exc:
+                st.error(f"Historical analysis failed for {var}: {exc}")
+                continue
+
+        if summary is not None:
+            all_hazards.append(hazards_df)
+            all_alerts.append(alerts_df)
+            all_maps_meta.extend(maps_meta)
+            total_maps += summary.map_count
+            total_cache += summary.cache_hits
+            total_fail += summary.failures
+            all_messages.extend(summary.messages)
+
+    if all_hazards:
+        hazards_df = pd.concat(all_hazards, ignore_index=True)
+        alerts_df = pd.concat(all_alerts, ignore_index=True)
+        from historical_runner import RunSummary
+        summary = RunSummary(
+            map_count=total_maps,
+            alert_count=len(alerts_df),
+            cache_hits=total_cache,
+            failures=total_fail,
+            messages=all_messages,
+            time_step_hours=params["time_step"],
+        )
+    else:
+        hazards_df = pd.DataFrame()
+        alerts_df = pd.DataFrame()
+        summary = None
+        all_maps_meta = []
 
     st.session_state.historical_maps_meta = maps_meta
     st.session_state.historical_hazards = hazards_df
@@ -545,7 +655,7 @@ def _run_historical(params: dict) -> None:
                 alerts_df=alerts_df,
                 summary=summary,
                 model=params["model"],
-                variable=params["variable"],
+                variable=variables[0] if len(variables) == 1 else ", ".join(variables),
                 region=params["region"],
             )
             if run_id:
@@ -635,151 +745,139 @@ def _render_existing_main(params: dict) -> None:
 
     df = st.session_state.data
     alerts = st.session_state.alerts
-
-    # ── ICAO-style risk alert panel ─────────────────────────────────────────
-    st.subheader("ICAO-style prototype risk advisories")
-    overall, summary = generate_overall_risk(alerts)
-    emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
-    st.markdown(f"**Overall risk:** {emoji.get(overall, '⚪')} {overall}")
-    st.caption(summary)
-    st.caption(DISCLAIMER)
-
-    if alerts.empty:
-        st.success("No active prototype advisories — parameters within normal range.")
-    else:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.plotly_chart(
-                create_alert_summary(alerts),
-                use_container_width=True,
-                key="alert_summary_chart",
-            )
-        with col_b:
-            st.plotly_chart(
-                create_alert_timeline(alerts),
-                use_container_width=True,
-                key="alert_timeline_chart",
-            )
-        show_cols = [
-            c for c in (
-                "timestamp", "region", "alert_type", "risk_level",
-                "reason", "possible_aviation_impact", "interpretation",
-            )
-            if c in alerts.columns
-        ]
-        st.dataframe(alerts[show_cols], use_container_width=True, height=220)
-
-    st.markdown("---")
-
-    # ── All Variables Overview ───────────────────────────────────────────────
     var_options = sorted(df["variable"].dropna().unique()) if "variable" in df.columns else []
 
-    st.subheader("All Variables Overview")
-    st.caption(f"{len(var_options)} variable(s) discovered from data source.")
+    # ── Tab layout ─────────────────────────────────────────────────────────
+    tab_overview, tab_maps, tab_ts, tab_advisories, tab_raw = st.tabs(
+        ["Overview", "Maps by variable", "Time series", "Advisories", "Raw data"]
+    )
 
-    if var_options:
-        # Summary table: one row per variable
-        _render_variable_summary_table(df, var_options)
+    # ── Tab 1: Overview ────────────────────────────────────────────────────
+    with tab_overview:
+        # -- Alert panel (compact) --
+        st.subheader("ICAO-style prototype risk advisories")
+        overall, summary = generate_overall_risk(alerts)
+        emoji_map = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
+        st.markdown(f"**Overall risk:** {emoji_map.get(overall, '⚪')} {overall}")
+        st.caption(summary)
+        st.caption(DISCLAIMER)
 
-        # Multi-variable time series (all variables in subplots)
+        if not alerts.empty:
+            with st.expander("Alert details", expanded=False):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.plotly_chart(create_alert_summary(alerts), use_container_width=True, key="alert_summary_chart")
+                with col_b:
+                    st.plotly_chart(create_alert_timeline(alerts), use_container_width=True, key="alert_timeline_chart")
+                show_cols = [c for c in ("timestamp", "region", "alert_type", "risk_level",
+                                         "reason", "possible_aviation_impact", "interpretation")
+                             if c in alerts.columns]
+                st.dataframe(alerts[show_cols], use_container_width=True, height=220)
+
+        st.markdown("---")
+
+        # -- All Variables Overview --
+        st.subheader("All Variables Overview")
+        st.caption(f"{len(var_options)} variable(s) discovered from data source.")
+
+        if var_options:
+            # Summary table from visualisation module
+            summary_df = create_variable_summary_table(df)
+            if not summary_df.empty:
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+            # Metric cards row
+            cards = create_variable_card_data(df)
+            if cards:
+                card_cols = st.columns(min(len(cards), 4))
+                for i, card in enumerate(cards[:4]):
+                    with card_cols[i % 4]:
+                        st.metric(
+                            label=f"{card['variable']} ({card.get('unit', '')})",
+                            value=card.get("mean"),
+                            delta=f"min={card.get('min')} max={card.get('max')}",
+                        )
+
+    # ── Tab 2: Maps by variable ─────────────────────────────────────────────
+    with tab_maps:
+        st.subheader("Maps by variable")
+        if var_options:
+            # Full map grid
+            try:
+                st.plotly_chart(
+                    create_variable_map_grid(df),
+                    use_container_width=True,
+                    key="var_map_grid",
+                )
+            except Exception:
+                st.warning("Map grid failed; showing individual maps instead.")
+                for var in var_options:
+                    with st.expander(var, expanded=False):
+                        st.plotly_chart(
+                            create_map_plot(df, variable=var, title=var),
+                            use_container_width=True,
+                            key=f"tab_map_{var}",
+                        )
+        else:
+            st.info("No variables to display.")
+
+    # ── Tab 3: Time series ──────────────────────────────────────────────────
+    with tab_ts:
         st.subheader("Time series — all variables")
-        st.plotly_chart(
-            create_time_series_plot(df),
-            use_container_width=True,
-            key="overview_all_ts",
+        normalize = st.checkbox("Normalize (min-max per variable)", value=False, key="ts_normalize")
+        if var_options:
+            st.plotly_chart(
+                create_multi_variable_time_series(df, normalize=normalize),
+                use_container_width=True,
+                key="multi_ts",
+            )
+        else:
+            st.info("No time-series data available.")
+
+    # ── Tab 4: Advisories ───────────────────────────────────────────────────
+    with tab_advisories:
+        st.subheader("ICAO-style prototype advisories")
+        st.caption(DISCLAIMER)
+        if alerts.empty:
+            st.success("No active prototype advisories — parameters within normal range.")
+        else:
+            overall2, summary2 = generate_overall_risk(alerts)
+            st.markdown(f"**Overall risk:** {emoji_map.get(overall2, '⚪')} {overall2}")
+            st.caption(summary2)
+            show_cols = [c for c in ("timestamp", "region", "alert_type", "risk_level",
+                                     "reason", "possible_aviation_impact", "interpretation")
+                         if c in alerts.columns]
+            st.dataframe(alerts[show_cols], use_container_width=True)
+            st.plotly_chart(create_alert_summary(alerts), use_container_width=True, key="adv_summary")
+            st.plotly_chart(create_alert_timeline(alerts), use_container_width=True, key="adv_timeline")
+
+    # ── Tab 5: Raw data ─────────────────────────────────────────────────────
+    with tab_raw:
+        st.subheader("Raw data")
+        raw_var_filter = st.multiselect(
+            "Filter by variable",
+            options=var_options,
+            default=[],
+            key="raw_var_filter",
         )
+        raw_df = df[df["variable"].isin(raw_var_filter)] if raw_var_filter else df
+        st.dataframe(raw_df, use_container_width=True)
+        st.caption(f"{len(raw_df):,} row(s)")
 
-        # Mini-map grid: 3 columns, one map per variable
-        st.subheader("Maps — all variables")
-        cols_per_row = 3
-        for row_start in range(0, len(var_options), cols_per_row):
-            row_vars = var_options[row_start:row_start + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for i, var in enumerate(row_vars):
-                with cols[i]:
-                    st.caption(f"**{var}**")
-                    st.plotly_chart(
-                        create_map_plot(df, variable=var, title=var),
-                        use_container_width=True,
-                        key=f"overview_map_{var}",
-                    )
-
-    st.markdown("---")
-
-    # ── Per-variable exploration ────────────────────────────────────────────
-    st.subheader("Data preview")
-    st.dataframe(df.head(100), use_container_width=True)
-
-    selected_var = st.selectbox("Variable for plots", var_options or [None])
-
-    col_ts, col_map = st.columns(2)
-    with col_ts:
-        st.subheader("Time series")
-        st.plotly_chart(
-            create_time_series_plot(df, variable=selected_var),
-            use_container_width=True,
-            key="overview_time_series",
-        )
-    with col_map:
-        st.subheader("Map / scatter (lat/lon)")
-        st.plotly_chart(
-            create_map_plot(df, variable=selected_var),
-            use_container_width=True,
-            key="overview_map",
-        )
-
-    with st.expander("Detailed tabs (GNSS / HF / General / Raw data)"):
-        tab_gnss, tab_hf, tab_gen, tab_raw = st.tabs(
-            ["GNSS", "HF Communication", "General", "Raw data"]
-        )
-
-        with tab_gnss:
-            gnss_vars = [v for v in var_options if "tec" in v.lower()]
-            for i, var in enumerate(gnss_vars or ["TEC"]):
-                if var not in df["variable"].values:
-                    continue
-                st.plotly_chart(
-                    create_map_plot(df, variable=var, title=f"GNSS — {var}"),
-                    use_container_width=True,
-                    key=f"gnss_map_{var}_{i}",
-                )
-
-        with tab_hf:
-            hf_vars = [v for v in var_options if "muf" in v.lower() or "fof2" in v.lower()]
-            for i, var in enumerate(hf_vars or ["MUF3000"]):
-                if var not in df["variable"].values:
-                    continue
-                st.plotly_chart(
-                    create_map_plot(df, variable=var, title=f"HF — {var}"),
-                    use_container_width=True,
-                    key=f"hf_map_{var}_{i}",
-                )
-
-        with tab_gen:
-            gen_vars = [v for v in var_options
-                        if "hmf2" in v.lower() or "nmf2" in v.lower()]
-            if not gen_vars:
-                st.info("No general ionospheric monitoring variables (hmF2, NmF2) in current data.")
-            for i, var in enumerate(gen_vars):
-                st.plotly_chart(
-                    create_map_plot(df, variable=var, title=f"General — {var}"),
-                    use_container_width=True,
-                    key=f"gen_map_{var}_{i}",
-                )
-
-        with tab_raw:
+        # Status metadata
+        with st.expander("Data source metadata"):
             st.json({
                 "source": st.session_state.status.source,
                 "message": st.session_state.status.message,
                 "warnings": st.session_state.status.warnings,
                 "metadata": st.session_state.status.metadata,
             })
-            st.download_button(
-                "Download CSV",
-                data=df.to_csv(index=False),
-                file_name=f"space_weather_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-            )
+        st.download_button(
+            "Download CSV",
+            data=df.to_csv(index=False),
+            file_name=f"space_weather_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -815,13 +913,21 @@ def _render_live_main(params: dict) -> None:
         st.info("Use the sidebar to configure and build a fixed map.")
         return
 
-    # Fixed map plot
-    st.subheader(f"Fixed grid map — {params.get('variable', '')}")
-    st.plotly_chart(
-        create_fixed_map_plot(map_df, variable=params.get("variable")),
-        use_container_width=True,
-        key="live_fixed_map",
-    )
+    # Variable summary if multi-variable
+    live_vars = sorted(map_df["variable"].dropna().unique()) if "variable" in map_df.columns else []
+    if len(live_vars) > 1:
+        st.subheader("Variable summary")
+        st.dataframe(create_variable_summary_table(map_df), use_container_width=True, hide_index=True)
+
+    # Fixed map plot — per variable in expanders
+    st.subheader("Fixed grid maps")
+    for var in live_vars:
+        with st.expander(f"Map — {var}", expanded=(len(live_vars) <= 2)):
+            st.plotly_chart(
+                create_fixed_map_plot(map_df, variable=var, title=f"Fixed grid — {var}"),
+                use_container_width=True,
+                key=f"live_fixed_map_{var}",
+            )
 
     st.markdown("---")
 

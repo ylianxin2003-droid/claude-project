@@ -8,14 +8,16 @@ risk advisories** for academic demonstration.
 
 ## Main features
 
+- **All Variables Overview** — auto-discovers every variable from SERENE/AIDA and displays summary statistics, per-variable maps, and normalised time series for all variables simultaneously
+- **Dynamic variable discovery** — variables are detected from current DataFrame, local JSON keys, or SERENE `/api/variables/` endpoint with a hardcoded fallback registry
 - **SERENE API integration** — official `POST /api/calc/` with `Authorization: Token <token>`
 - **Local sample fallback** — bundled JSON grid data works without any API configuration
 - **2.5° fixed grid maps** — configurable resolution with global and regional grids
 - **Map caching** — automatic Parquet/CSV cache in `data/cache/` to avoid repeated API calls
 - **Hazard detection** — spatial gradient and temporal change rate analysis with configurable thresholds
 - **ICAO-style prototype advisories** — Watch / Warning / Severe levels with aviation impact descriptions
-- **Live fixed map mode** — single-timestamp grid build + hazard detection + advisories
-- **Historical analysis mode** — time-window sweep across multiple timestamps
+- **Live fixed map mode** — single-timestamp grid build + hazard detection + advisories (supports all variables)
+- **Historical analysis mode** — time-window sweep across multiple timestamps (supports all variables with cache warning)
 - **May 2024 geomagnetic storm case study** — one-click preset for academic demonstration
 
 ---
@@ -58,8 +60,47 @@ SERENE API (/api/calc/)          Local sample JSON
 | `alert_engine.py` | ICAO-style prototype advisory generation |
 | `historical_runner.py` | Time-window historical analysis runner |
 | `visualisation.py` | All Plotly charts |
+| `variable_registry.py` | Centralised variable discovery (5 functions) |
 | `requirements.txt` | Python dependencies |
 | `data/*.json` | Bundled sample data |
+
+---
+
+## Variable registry
+
+Variables are discovered dynamically from multiple sources in priority order:
+
+1. **Current DataFrame** — `df["variable"].unique()`
+2. **Local JSON file** — `product["variables"].keys()`
+3. **SERENE API** — `/api/variables/` endpoint (if available)
+4. **Fallback registry** — hardcoded default list
+
+The `variable_registry.py` module provides five public functions:
+
+| Function | Purpose |
+|---|---|
+| `get_default_variables()` | Returns the canonical 7-variable list |
+| `discover_variables_from_dataframe(df)` | Extracts variables + metadata from a loaded DataFrame |
+| `discover_variables_from_local_json(path)` | Reads variables + metadata from an AIDA grid JSON file |
+| `discover_variables_from_api(client, model)` | Discovers variables from SERENE API (falls back on failure) |
+| `get_available_variables(source, df, local_file, client, model)` | Unified entry point with the priority chain above |
+
+### Default variable registry
+
+| Variable | Default risk relevance |
+|---|---|
+| `TEC` | GNSS positioning risk |
+| `MUF3000` | HF communication risk |
+| `foF2` | HF communication risk |
+| `MUF3000_depression` | HF communication risk |
+| `foF2_depression` | HF communication risk |
+| `hmF2` | General ionospheric monitoring |
+| `NmF2` | General ionospheric monitoring |
+
+Variables marked as "General ionospheric monitoring" (hmF2, NmF2) do not have
+hazard thresholds configured and will **not** generate Warning or Severe
+ICAO-style advisories.  They appear in the monitoring overview as Normal with
+the note "No prototype hazard threshold configured; monitoring summary only."
 
 ---
 

@@ -513,6 +513,295 @@ def create_historical_summary_plot(alerts: pd.DataFrame) -> go.Figure:
     return fig
 
 
+# ── Variable summary table ────────────────────────────────────────────────────
+
+
+def create_variable_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Build a per-variable summary DataFrame for display.
+
+    Returns a DataFrame with columns:
+        variable, unit, description, min, max, mean, valid_points, risk_relevance
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain at least ``variable`` and ``value`` columns.
+        ``unit`` and ``description`` columns are used when present.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per variable, sorted by variable name.
+    """
+    if df is None or df.empty or "variable" not in df.columns:
+        return pd.DataFrame(columns=[
+            "variable", "unit", "description", "min", "max", "mean", "valid_points", "risk_relevance",
+        ])
+
+    rows: list[dict[str, object]] = []
+    var_names = sorted(df["variable"].dropna().unique())
+
+    for var in var_names:
+        var_df = df[df["variable"] == var]
+        vals = pd.to_numeric(var_df["value"], errors="coerce").dropna()
+
+        unit = ""
+        if "unit" in var_df.columns:
+            first = var_df["unit"].dropna()
+            if not first.empty:
+                unit = str(first.iloc[0])
+        description = ""
+        if "description" in var_df.columns:
+            first = var_df["description"].dropna()
+            if not first.empty:
+                description = str(first.iloc[0])
+
+        risk_rel = _risk_relevance(var)
+
+        rows.append({
+            "variable": var,
+            "unit": unit,
+            "description": description,
+            "min": round(float(vals.min()), 3) if not vals.empty else None,
+            "max": round(float(vals.max()), 3) if not vals.empty else None,
+            "mean": round(float(vals.mean()), 3) if not vals.empty else None,
+            "valid_points": len(vals),
+            "risk_relevance": risk_rel,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _risk_relevance(variable: str) -> str:
+    """Map a variable name to its risk relevance category."""
+    name = variable.lower()
+    if "tec" in name and "dep" not in name:
+        return "GNSS positioning risk"
+    if "muf" in name or "fof2" in name:
+        return "HF communication risk"
+    if "hmf2" in name or "nmf2" in name:
+        return "General ionospheric monitoring"
+    return "General ionospheric monitoring"
+
+
+# ── Multi-variable time series ────────────────────────────────────────────────
+
+
+def create_multi_variable_time_series(
+    df: pd.DataFrame,
+    normalize: bool = False,
+    title: str | None = None,
+) -> go.Figure:
+    """Time-series plot with one subplot per variable.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain ``time``, ``variable``, and ``value`` columns.
+    normalize : bool
+        If True, apply min-max normalisation per variable so that variables
+        with different units can be compared on the same scale.
+    title : str, optional
+        Chart title.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    if df is None or df.empty:
+        return empty_figure("No data available for time-series plot.")
+
+    if "variable" not in df.columns or "value" not in df.columns:
+        return empty_figure("Data missing required columns (variable, value).")
+
+    work = df.copy()
+    if "time" in work.columns:
+        work["time"] = pd.to_datetime(work["time"], errors="coerce")
+    else:
+        work["time"] = pd.to_datetime("now")
+
+    grouped = work.groupby(["time", "variable"], as_index=False)["value"].mean()
+    var_names = sorted(grouped["variable"].dropna().unique())
+
+    if not var_names:
+        return empty_figure("No variables with valid data.")
+
+    if normalize:
+        for var in var_names:
+            mask = grouped["variable"] == var
+            vmin = grouped.loc[mask, "value"].min()
+            vmax = grouped.loc[mask, "value"].max()
+            if vmax > vmin:
+                grouped.loc[mask, "value"] = (grouped.loc[mask, "value"] - vmin) / (vmax - vmin)
+            else:
+                grouped.loc[mask, "value"] = 0.5
+        yaxis_title = "Normalised value (0–1)"
+    else:
+        yaxis_title = "Value"
+
+    n_vars = len(var_names)
+    fig = make_subplots(
+        rows=n_vars, cols=1,
+        shared_xaxes=True,
+        subplot_titles=list(var_names),
+        vertical_spacing=0.03,
+    )
+
+    for i, var in enumerate(var_names):
+        sub = grouped[grouped["variable"] == var]
+        fig.add_trace(
+            go.Scatter(
+                x=sub["time"], y=sub["value"],
+                mode="lines+markers", name=var,
+                showlegend=False,
+            ),
+            row=i + 1, col=1,
+        )
+
+    fig.update_layout(
+        title_text=title or "All variables — time series",
+        height=max(300, 180 * n_vars),
+        template="plotly_white",
+        hovermode="x unified",
+        yaxis_title=yaxis_title,
+    )
+    return fig
+
+
+# ── Variable map grid ─────────────────────────────────────────────────────────
+
+
+def create_variable_map_grid(df: pd.DataFrame) -> go.Figure:
+    """Subplot grid of scatter-geo maps, one per variable.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain ``lat``, ``lon``, ``variable``, ``value`` columns.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    if df is None or df.empty:
+        return empty_figure("No data available for map grid.")
+
+    if "variable" not in df.columns:
+        return empty_figure("Data missing 'variable' column for map grid.")
+
+    var_names = sorted(df["variable"].dropna().unique())
+    if not var_names:
+        return empty_figure("No variables in data.")
+
+    n_vars = len(var_names)
+    n_cols = min(3, n_vars)
+    n_rows = (n_vars + n_cols - 1) // n_cols
+
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        subplot_titles=list(var_names),
+        specs=[[{"type": "scattergeo"} for _ in range(n_cols)] for _ in range(n_rows)],
+        vertical_spacing=0.05,
+        horizontal_spacing=0.02,
+    )
+
+    for i, var in enumerate(var_names):
+        row = i // n_cols + 1
+        col = i % n_cols + 1
+        var_df = df[df["variable"] == var]
+        if len(var_df) > 1500:
+            var_df = var_df.sample(n=1500, random_state=42)
+
+        # Latest time slice if multiple.
+        if "time" in var_df.columns:
+            var_df["time"] = pd.to_datetime(var_df["time"], errors="coerce")
+            var_df = var_df[var_df["time"] == var_df["time"].max()]
+
+        fig.add_trace(
+            go.Scattergeo(
+                lat=var_df["lat"], lon=var_df["lon"],
+                mode="markers",
+                marker=dict(
+                    size=4,
+                    color=var_df["value"],
+                    colorscale="Plasma",
+                    showscale=(i == 0),
+                    colorbar=dict(title="Value", x=0.02, len=0.3) if i == 0 else None,
+                ),
+                name=var,
+                text=var_df["value"].round(3),
+                hoverinfo="text+name",
+                showlegend=False,
+            ),
+            row=row, col=col,
+        )
+
+    fig.update_geos(
+        showcoastlines=True, coastlinecolor="gray",
+        showland=True, landcolor="lightgray",
+        showocean=True, oceancolor="aliceblue",
+    )
+    fig.update_layout(
+        title="All variables — maps",
+        template="plotly_white",
+        height=280 * n_rows,
+    )
+    return fig
+
+
+# ── Variable card data ────────────────────────────────────────────────────────
+
+
+def create_variable_card_data(df: pd.DataFrame) -> list[dict[str, object]]:
+    """Build per-variable summary cards for use with ``st.metric``.
+
+    Returns a list of dicts, one per variable, with keys:
+        variable, unit, description, min, max, mean, count, risk_relevance
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain ``variable`` and ``value`` columns.
+
+    Returns
+    -------
+    list[dict]
+    """
+    if df is None or df.empty or "variable" not in df.columns:
+        return []
+
+    cards: list[dict[str, object]] = []
+    for var in sorted(df["variable"].dropna().unique()):
+        var_df = df[df["variable"] == var]
+        vals = pd.to_numeric(var_df["value"], errors="coerce").dropna()
+        if vals.empty:
+            continue
+
+        unit = ""
+        if "unit" in var_df.columns:
+            first = var_df["unit"].dropna()
+            if not first.empty:
+                unit = str(first.iloc[0])
+        description = ""
+        if "description" in var_df.columns:
+            first = var_df["description"].dropna()
+            if not first.empty:
+                description = str(first.iloc[0])
+
+        cards.append({
+            "variable": var,
+            "unit": unit,
+            "description": description,
+            "min": round(float(vals.min()), 3),
+            "max": round(float(vals.max()), 3),
+            "mean": round(float(vals.mean()), 3),
+            "count": len(vals),
+            "risk_relevance": _risk_relevance(var),
+        })
+
+    return cards
+
+
 # ── Utility ─────────────────────────────────────────────────────────────────
 
 
