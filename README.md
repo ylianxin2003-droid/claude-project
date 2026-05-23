@@ -66,12 +66,14 @@ map cache     hazard detection   (hazard_detector.py)
 
 ## Variable registry
 
-Variables are discovered dynamically from multiple sources in priority order:
+Variables are discovered dynamically in priority order:
 
-1. **Current DataFrame** — `df["variable"].unique()`
-2. **Local JSON file** — `product["variables"].keys()`
-3. **SERENE API** — `/api/variables/` endpoint (if available)
-4. **Fallback registry** — hardcoded default list
+1. **Current API DataFrame** — `df["variable"].unique()`
+2. **SERENE API** — `/api/variables/` endpoint (if available)
+3. **Fallback default registry** — hardcoded default list
+
+Legacy local JSON discovery helpers may remain in the codebase, but they are
+not used by the current API-only workflow.
 
 The `variable_registry.py` module provides five public functions:
 
@@ -79,7 +81,7 @@ The `variable_registry.py` module provides five public functions:
 |---|---|
 | `get_default_variables()` | Returns the canonical 7-variable list |
 | `discover_variables_from_dataframe(df)` | Extracts variables + metadata from a loaded DataFrame |
-| `discover_variables_from_local_json(path)` | Reads variables + metadata from an AIDA grid JSON file |
+| `discover_variables_from_local_json(path)` | Legacy helper — not used by the API-only workflow |
 | `discover_variables_from_api(client, model)` | Discovers variables from SERENE API (falls back on failure) |
 | `get_available_variables(source, df, local_file, client, model)` | Unified entry point with the priority chain above |
 

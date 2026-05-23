@@ -1,8 +1,8 @@
 """
-Unified data loader.
+SERENE API-only data loader.
 
 Single entry-point :func:`load_data` for the Streamlit dashboard.
-SERENE API is primary; local JSON sample file is the automatic fallback.
+Local file mode is disabled.
 """
 
 from __future__ import annotations
@@ -53,16 +53,18 @@ class LoadStatus:
 
 
 def discover_variables(local_file: str | Path | None = None) -> list[str]:
-    """Auto-discover available variables from local JSON.
+    """Auto-discover available variables from SERENE API.
 
-    Delegates to :func:`variable_registry.get_available_variables`.
-    Returns only the variable name list (no metadata).
+    Falls back to the default variable registry when the API variables
+    endpoint is unavailable.  Does not read local JSON files.
     """
     from variable_registry import get_available_variables
+    from serene_client import SereneClient
 
     vars_list, _metadata = get_available_variables(
-        source="auto",
-        local_file=resolve_local_file(local_file),
+        source="api",
+        client=SereneClient(),
+        model="AIDA",
     )
     return vars_list
 
