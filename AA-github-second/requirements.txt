@@ -1,0 +1,9 @@
+streamlit
+requests
+python-dotenv
+pandas
+numpy
+plotly
+pyarrow
+xarray
+netCDF4
