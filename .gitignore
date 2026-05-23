@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.pytest_cache/
+
+# Streamlit — never commit real secrets
+.streamlit/secrets.toml
+
+# Map cache & history — auto-generated, safe to delete
+data/cache/
+data/history/
+*.parquet
+*.log
+
+# Claude Code
+.claude/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
