@@ -30,6 +30,8 @@ _VARIABLE_HAZARD_MAP: dict[str, str] = {
     "MUF3000_depression": "HF communication risk",
     "foF2": "HF communication risk",
     "foF2_depression": "HF communication risk",
+    "hmF2": "General ionospheric disturbance",
+    "NmF2": "General ionospheric disturbance",
     "ionospheric_disturbance": "General ionospheric disturbance",
 }
 
@@ -44,6 +46,8 @@ def _hazard_type_for(variable: str) -> str:
         return "GNSS positioning risk"
     if "muf" in name or "fof2" in name:
         return "HF communication risk"
+    if "hmf2" in name or "nmf2" in name:
+        return "General ionospheric disturbance"
     if "disturb" in name:
         return "General ionospheric disturbance"
     return "General ionospheric disturbance"

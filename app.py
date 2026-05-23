@@ -23,7 +23,7 @@ from config import (
     reload_config,
     validate_config,
 )
-from data_loader import LoadStatus, load_data, resolve_local_file
+from data_loader import LoadStatus, discover_variables, load_data, resolve_local_file
 from grid_generator import list_regions
 from hazard_detector import detect_hazards_from_map
 from historical_runner import list_historical_runs, load_historical_run, run_historical_analysis, save_historical_run
@@ -84,6 +84,8 @@ if "historical_summary" not in st.session_state:
     st.session_state.historical_summary = None
 if "historical_run_id" not in st.session_state:
     st.session_state.historical_run_id = None
+if "available_variables" not in st.session_state:
+    st.session_state.available_variables = discover_variables()
 
 # Auto-load bundled sample data on first visit.
 if "bootstrap_done" not in st.session_state:
@@ -92,6 +94,9 @@ if "bootstrap_done" not in st.session_state:
         st.session_state.data = _boot_df
         st.session_state.status = _boot_status
         st.session_state.alerts = generate_alerts(_boot_df)
+        # Refresh variable list from actual data.
+        if "variable" in _boot_df.columns:
+            st.session_state.available_variables = sorted(_boot_df["variable"].dropna().unique().tolist())
     st.session_state.bootstrap_done = True
 
 
@@ -137,6 +142,45 @@ def _source_label(status: LoadStatus) -> str:
     return mapping.get(status.source, status.source)
 
 
+def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> None:
+    """Render a summary table with one row per variable (min, max, mean, std, risk)."""
+    from hazard_detector import _classify_from_thresholds, _hazard_type_for
+
+    rows: list[dict[str, object]] = []
+    for var in var_options:
+        var_df = df[df["variable"] == var]
+        if var_df.empty:
+            continue
+        vals = pd.to_numeric(var_df["value"], errors="coerce").dropna()
+        if vals.empty:
+            continue
+        max_val = float(vals.max())
+        risk = _classify_from_thresholds(max_val, 0.0, 0.0, var)
+        rows.append({
+            "Variable": var,
+            "Min": round(float(vals.min()), 3),
+            "Max": round(float(vals.max()), 3),
+            "Mean": round(float(vals.mean()), 3),
+            "Std": round(float(vals.std()), 3),
+            "Count": len(vals),
+            "Risk": risk,
+            "Hazard Type": _hazard_type_for(var),
+        })
+
+    if not rows:
+        st.info("No numeric values to summarize.")
+        return
+
+    summary_df = pd.DataFrame(rows)
+
+    def _risk_color(val: object) -> str:
+        colors = {"Severe": "#ff4b4b", "Warning": "#ffa726", "Watch": "#ffd54f", "Normal": "#66bb6a"}
+        return f"background-color: {colors.get(str(val), 'transparent')}; color: white; font-weight: bold"
+
+    styled = summary_df.style.map(_risk_color, subset=["Risk"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sidebar — Existing dashboard mode
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,11 +218,11 @@ def _render_existing_sidebar() -> dict:
         value=now.strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
-    avail_vars = ["TEC", "MUF3000", "foF2", "MUF3000_depression", "foF2_depression"]
+    avail_vars = st.session_state.available_variables
     selected_vars = st.sidebar.multiselect(
         "Variable selection",
         options=avail_vars,
-        default=["TEC"],
+        default=avail_vars,
     )
     params["variables"] = selected_vars or None
 
@@ -251,6 +295,9 @@ def _do_load(params: dict) -> None:
         st.session_state.data = df
         st.session_state.status = status
         st.session_state.alerts = generate_alerts(df) if not df.empty else pd.DataFrame()
+        # Refresh variable list from actual loaded data.
+        if not df.empty and "variable" in df.columns:
+            st.session_state.available_variables = sorted(df["variable"].dropna().unique().tolist())
     finally:
         progress_bar.empty()
 
@@ -270,7 +317,7 @@ def _render_live_sidebar() -> dict:
     params["model"] = st.sidebar.selectbox("Model", ["AIDA", "TOMIRIS"], key="live_model")
     params["variable"] = st.sidebar.selectbox(
         "Variable",
-        ["TEC", "MUF3000", "foF2", "MUF3000_depression", "foF2_depression"],
+        st.session_state.available_variables,
         key="live_var",
     )
     params["region"] = st.sidebar.selectbox(
@@ -368,7 +415,7 @@ def _render_historical_sidebar() -> dict:
     params["model"] = st.sidebar.selectbox("Model", ["AIDA", "TOMIRIS"], key="hist_model")
     params["variable"] = st.sidebar.selectbox(
         "Variable",
-        ["TEC", "MUF3000", "foF2", "MUF3000_depression", "foF2_depression"],
+        st.session_state.available_variables,
         key="hist_var",
     )
     params["region"] = st.sidebar.selectbox(
@@ -608,11 +655,45 @@ def _render_existing_main(params: dict) -> None:
 
     st.markdown("---")
 
-    # ── Visualisations ──────────────────────────────────────────────────────
+    # ── All Variables Overview ───────────────────────────────────────────────
+    var_options = sorted(df["variable"].dropna().unique()) if "variable" in df.columns else []
+
+    st.subheader("All Variables Overview")
+    st.caption(f"{len(var_options)} variable(s) discovered from data source.")
+
+    if var_options:
+        # Summary table: one row per variable
+        _render_variable_summary_table(df, var_options)
+
+        # Multi-variable time series (all variables in subplots)
+        st.subheader("Time series — all variables")
+        st.plotly_chart(
+            create_time_series_plot(df),
+            use_container_width=True,
+            key="overview_all_ts",
+        )
+
+        # Mini-map grid: 3 columns, one map per variable
+        st.subheader("Maps — all variables")
+        cols_per_row = 3
+        for row_start in range(0, len(var_options), cols_per_row):
+            row_vars = var_options[row_start:row_start + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for i, var in enumerate(row_vars):
+                with cols[i]:
+                    st.caption(f"**{var}**")
+                    st.plotly_chart(
+                        create_map_plot(df, variable=var, title=var),
+                        use_container_width=True,
+                        key=f"overview_map_{var}",
+                    )
+
+    st.markdown("---")
+
+    # ── Per-variable exploration ────────────────────────────────────────────
     st.subheader("Data preview")
     st.dataframe(df.head(100), use_container_width=True)
 
-    var_options = sorted(df["variable"].dropna().unique()) if "variable" in df.columns else []
     selected_var = st.selectbox("Variable for plots", var_options or [None])
 
     col_ts, col_map = st.columns(2)
@@ -631,12 +712,16 @@ def _render_existing_main(params: dict) -> None:
             key="overview_map",
         )
 
-    with st.expander("Detailed tabs (GNSS / HF / raw data)"):
-        tab_gnss, tab_hf, tab_raw = st.tabs(["GNSS", "HF Communication", "Raw data"])
+    with st.expander("Detailed tabs (GNSS / HF / General / Raw data)"):
+        tab_gnss, tab_hf, tab_gen, tab_raw = st.tabs(
+            ["GNSS", "HF Communication", "General", "Raw data"]
+        )
 
         with tab_gnss:
             gnss_vars = [v for v in var_options if "tec" in v.lower()]
-            for i, var in enumerate(gnss_vars or var_options[:1]):
+            for i, var in enumerate(gnss_vars or ["TEC"]):
+                if var not in df["variable"].values:
+                    continue
                 st.plotly_chart(
                     create_map_plot(df, variable=var, title=f"GNSS — {var}"),
                     use_container_width=True,
@@ -645,11 +730,25 @@ def _render_existing_main(params: dict) -> None:
 
         with tab_hf:
             hf_vars = [v for v in var_options if "muf" in v.lower() or "fof2" in v.lower()]
-            for i, var in enumerate(hf_vars or var_options[:1]):
+            for i, var in enumerate(hf_vars or ["MUF3000"]):
+                if var not in df["variable"].values:
+                    continue
                 st.plotly_chart(
                     create_map_plot(df, variable=var, title=f"HF — {var}"),
                     use_container_width=True,
                     key=f"hf_map_{var}_{i}",
+                )
+
+        with tab_gen:
+            gen_vars = [v for v in var_options
+                        if "hmf2" in v.lower() or "nmf2" in v.lower()]
+            if not gen_vars:
+                st.info("No general ionospheric monitoring variables (hmF2, NmF2) in current data.")
+            for i, var in enumerate(gen_vars):
+                st.plotly_chart(
+                    create_map_plot(df, variable=var, title=f"General — {var}"),
+                    use_container_width=True,
+                    key=f"gen_map_{var}_{i}",
                 )
 
         with tab_raw:

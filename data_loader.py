@@ -53,6 +53,26 @@ class LoadStatus:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def discover_variables(local_file: str | Path | None = None) -> list[str]:
+    """Auto-discover available variables from local JSON.
+
+    Reads variable keys without loading the full grid into memory.
+    Falls back to a standard list when the file is unavailable.
+    """
+    import json
+    path = resolve_local_file(local_file)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            product = json.load(fh)
+        vars_dict = product.get("variables", {})
+        if vars_dict:
+            return sorted(vars_dict.keys())
+    except Exception:
+        pass
+    # Last-resort fallback
+    return ["TEC", "MUF3000", "foF2", "hmF2", "NmF2", "MUF3000_depression", "foF2_depression"]
+
+
 def load_data(
     source: str = "api",
     model: str = "AIDA",

@@ -262,7 +262,7 @@ class SereneClient:
                 return True, msg, variables
 
         # ★ Placeholder defaults for dashboard prototyping
-        defaults = ["TEC", "MUF3000", "foF2", "MUF3000_depression", "foF2_depression"]
+        defaults = ["TEC", "MUF3000", "foF2", "hmF2", "NmF2", "MUF3000_depression", "foF2_depression"]
         note = "Using default variable list (variables endpoint not available)."
         if not ok and "404" in msg:
             return True, note, defaults
