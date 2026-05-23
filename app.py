@@ -24,6 +24,7 @@ from config import (
     validate_config,
 )
 from data_loader import LoadStatus, discover_variables, load_data, resolve_local_file
+from variable_registry import get_available_variables
 from grid_generator import list_regions
 from hazard_detector import detect_hazards_from_map
 from historical_runner import list_historical_runs, load_historical_run, run_historical_analysis, save_historical_run
@@ -86,6 +87,8 @@ if "historical_run_id" not in st.session_state:
     st.session_state.historical_run_id = None
 if "available_variables" not in st.session_state:
     st.session_state.available_variables = discover_variables()
+if "available_variable_metadata" not in st.session_state:
+    st.session_state.available_variable_metadata = {}
 
 # Auto-load bundled sample data on first visit.
 if "bootstrap_done" not in st.session_state:
@@ -94,9 +97,15 @@ if "bootstrap_done" not in st.session_state:
         st.session_state.data = _boot_df
         st.session_state.status = _boot_status
         st.session_state.alerts = generate_alerts(_boot_df)
-        # Refresh variable list from actual data.
+        # Refresh variable list and metadata from actual data.
         if "variable" in _boot_df.columns:
-            st.session_state.available_variables = sorted(_boot_df["variable"].dropna().unique().tolist())
+            _vars, _meta = get_available_variables(
+                source="auto",
+                df=_boot_df,
+                local_file=resolve_local_file(),
+            )
+            st.session_state.available_variables = _vars
+            st.session_state.available_variable_metadata = _meta
     st.session_state.bootstrap_done = True
 
 
@@ -143,8 +152,10 @@ def _source_label(status: LoadStatus) -> str:
 
 
 def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> None:
-    """Render a summary table with one row per variable (min, max, mean, std, risk)."""
+    """Render a summary table with one row per variable (min, max, mean, std, unit, risk)."""
     from hazard_detector import _classify_from_thresholds, _hazard_type_for
+
+    meta = st.session_state.get("available_variable_metadata", {})
 
     rows: list[dict[str, object]] = []
     for var in var_options:
@@ -156,8 +167,11 @@ def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> 
             continue
         max_val = float(vals.max())
         risk = _classify_from_thresholds(max_val, 0.0, 0.0, var)
+        var_meta = meta.get(var, {})
         rows.append({
             "Variable": var,
+            "Unit": var_meta.get("unit", ""),
+            "Description": var_meta.get("description", ""),
             "Min": round(float(vals.min()), 3),
             "Max": round(float(vals.max()), 3),
             "Mean": round(float(vals.mean()), 3),
@@ -295,9 +309,11 @@ def _do_load(params: dict) -> None:
         st.session_state.data = df
         st.session_state.status = status
         st.session_state.alerts = generate_alerts(df) if not df.empty else pd.DataFrame()
-        # Refresh variable list from actual loaded data.
+        # Refresh variable list and metadata from actual loaded data.
         if not df.empty and "variable" in df.columns:
-            st.session_state.available_variables = sorted(df["variable"].dropna().unique().tolist())
+            _vars, _meta = get_available_variables(source="auto", df=df)
+            st.session_state.available_variables = _vars
+            st.session_state.available_variable_metadata = _meta
     finally:
         progress_bar.empty()
 
