@@ -33,7 +33,7 @@ CACHE_DIR: str = str(PROJECT_ROOT / "data" / "cache")
 HISTORY_DIR: str = str(PROJECT_ROOT / "data" / "history")
 DEFAULT_REGION: str = "global"
 SERENE_BATCH_SIZE: int = 500
-DEFAULT_TIME_STEP_HOURS: int = 1
+DEFAULT_TIME_STEP_HOURS: int = 12
 
 # ── Hazard detection thresholds (prototype, not official ICAO) ───────────
 # value_*  → threshold on the variable value itself

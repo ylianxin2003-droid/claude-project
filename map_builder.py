@@ -11,7 +11,7 @@ import logging
 
 import pandas as pd
 
-from config import DEFAULT_REGION, MAP_RESOLUTION_DEFAULT
+from config import DEFAULT_REGION, MAP_RESOLUTION_DEFAULT, SERENE_API_TOKEN
 from grid_generator import generate_region_grid
 from map_cache import cache_exists, load_cached_map, save_cached_map
 from serene_client import SereneClient
@@ -30,6 +30,7 @@ def build_fixed_map(
     resolution: float = MAP_RESOLUTION_DEFAULT,
     use_cache: bool = True,
     force_refresh: bool = False,
+    max_points: int = 500,
 ) -> tuple[pd.DataFrame, str]:
     """Build a fixed-resolution grid map for a single *variable*.
 
@@ -50,6 +51,9 @@ def build_fixed_map(
         If ``True`` (default), return a cached result when available.
     force_refresh : bool
         If ``True``, bypass the cache and re-fetch from the API.
+    max_points : int
+        Maximum grid points allowed when cache is unavailable (default 500).
+        Exceeding this returns an empty DataFrame with a status message.
 
     Returns
     -------
@@ -63,10 +67,24 @@ def build_fixed_map(
         if not df.empty:
             return df, f"Loaded from cache ({len(df)} rows)."
 
+    # ── 1a. Token check ───────────────────────────────────────────────────
+    if not SERENE_API_TOKEN:
+        return pd.DataFrame(), (
+            "SERENE API token is not configured. "
+            "Fixed map requires API access or existing cache."
+        )
+
     # ── 2. Generate grid points ───────────────────────────────────────────
     grid_df = generate_region_grid(region, resolution=resolution)
     total = len(grid_df)
     logger.info("Grid: %d points for region=%s @ %.1f°", total, region, resolution)
+
+    # ── 2a. Safety limit — refuse oversized grid when cache can't help ──────
+    if total > max_points:
+        return pd.DataFrame(), (
+            f"Too many API calls: {total} grid points. "
+            "Please use cache, select a smaller region, or use coarser resolution."
+        )
 
     # ── 3. Fetch from SERENE API (point-by-point) ─────────────────────────
     client = SereneClient()

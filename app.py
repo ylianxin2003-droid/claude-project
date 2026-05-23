@@ -16,9 +16,7 @@ import streamlit as st
 
 from alert_engine import DISCLAIMER, generate_alerts, generate_alerts_from_hazards, generate_overall_risk
 from config import (
-    DEFAULT_REGION,
     DEFAULT_TIME_STEP_HOURS,
-    MAP_RESOLUTION_DEFAULT,
     SERENE_API_TOKEN,
     reload_config,
     validate_config,
@@ -353,8 +351,9 @@ def _render_live_sidebar() -> dict:
     # Variable selection — support show all
     show_all_live = st.sidebar.checkbox(
         "Show all variables",
-        value=st.session_state.show_all_variables,
+        value=False,
         key="live_show_all",
+        help="Build fixed maps for all available variables.",
     )
     st.session_state.show_all_variables = show_all_live
     if show_all_live:
@@ -369,15 +368,16 @@ def _render_live_sidebar() -> dict:
             )
         ]
 
+    _live_regions = list_regions()
     params["region"] = st.sidebar.selectbox(
         "Region",
-        list_regions(),
-        index=list_regions().index(DEFAULT_REGION),
+        _live_regions,
+        index=_live_regions.index("uk") if "uk" in _live_regions else 0,
         key="live_region",
     )
     params["resolution"] = st.sidebar.slider(
         "Resolution (degrees)",
-        0.5, 10.0, MAP_RESOLUTION_DEFAULT, 0.5,
+        0.5, 10.0, 10.0, 0.5,
         key="live_res",
     )
 
@@ -412,6 +412,37 @@ def _build_live_map(params: dict) -> None:
         variables = st.session_state.available_variables
     if isinstance(variables, str):
         variables = [variables]
+
+    # ── Safety checks ────────────────────────────────────────────────────
+    from grid_generator import generate_region_grid
+    grid_df = generate_region_grid(params["region"], resolution=params["resolution"])
+    est_points = len(grid_df)
+    use_cache = params.get("use_cache", True)
+    force_refresh = params.get("force_refresh", False)
+    is_all_vars = params.get("variables") is None
+
+    # Option A: block all-variables API fetch unless cached.
+    if is_all_vars and (force_refresh or not use_cache):
+        st.error(
+            "**All variables live API fetch is disabled** to prevent excessive "
+            "API calls. Please select one variable or use cached maps."
+        )
+        st.session_state.live_map_df = pd.DataFrame()
+        st.session_state.live_map_status = "Blocked: all-variables API fetch disabled."
+        st.session_state.live_hazards = pd.DataFrame()
+        st.session_state.live_alerts = pd.DataFrame()
+        return
+
+    if est_points > 500 and (force_refresh or not use_cache):
+        st.error(
+            "**Too many API calls for live fixed map.** "
+            "Please select a smaller region, use coarser resolution, or use cached data."
+        )
+        st.session_state.live_map_df = pd.DataFrame()
+        st.session_state.live_map_status = f"Blocked: {est_points} points exceeds limit."
+        st.session_state.live_hazards = pd.DataFrame()
+        st.session_state.live_alerts = pd.DataFrame()
+        return
 
     all_frames: list[pd.DataFrame] = []
     messages: list[str] = []
@@ -505,12 +536,12 @@ def _render_historical_sidebar() -> dict:
     params["region"] = st.sidebar.selectbox(
         "Region",
         list_regions(),
-        index=list_regions().index(DEFAULT_REGION),
+        index=list_regions().index("uk"),
         key="hist_region",
     )
     params["resolution"] = st.sidebar.slider(
         "Resolution (degrees)",
-        0.5, 10.0, MAP_RESOLUTION_DEFAULT, 0.5,
+        0.5, 10.0, 10.0, 0.5,
         key="hist_res",
     )
 
@@ -589,6 +620,44 @@ def _run_historical(params: dict) -> None:
     if isinstance(variables, str):
         variables = [variables]
 
+    # ── Safety checks ────────────────────────────────────────────────────
+    use_cache = params.get("use_cache", True)
+    force_refresh = params.get("force_refresh", False)
+
+    # No token + no cache = cannot run.
+    if not SERENE_API_TOKEN and (force_refresh or not use_cache):
+        st.error(
+            "**Historical analysis requires SERENE API access or precomputed cache.** "
+            "Local file fallback is disabled."
+        )
+        st.session_state.historical_maps_meta = []
+        st.session_state.historical_hazards = pd.DataFrame()
+        st.session_state.historical_alerts = pd.DataFrame()
+        st.session_state.historical_summary = None
+        return
+
+    from grid_generator import generate_region_grid
+    grid_df = generate_region_grid(params["region"], resolution=params["resolution"])
+    est_points = len(grid_df)
+    time_steps = len(pd.date_range(
+        pd.to_datetime(params["start_time"]),
+        pd.to_datetime(params["end_time"]),
+        freq=f"{params['time_step']}h",
+    ))
+    estimated_requests = est_points * time_steps * len(variables)
+
+    if estimated_requests > 1000:
+        st.error(
+            f"**Estimated API requests = {estimated_requests}.** "
+            "Historical analysis is too large for point-based API. "
+            "Use cached maps, larger time step, smaller region, or coarser resolution."
+        )
+        st.session_state.historical_maps_meta = []
+        st.session_state.historical_hazards = pd.DataFrame()
+        st.session_state.historical_alerts = pd.DataFrame()
+        st.session_state.historical_summary = None
+        return
+
     all_hazards: list[pd.DataFrame] = []
     all_alerts: list[pd.DataFrame] = []
     all_maps_meta: list[dict] = []
@@ -642,7 +711,7 @@ def _run_historical(params: dict) -> None:
         summary = None
         all_maps_meta = []
 
-    st.session_state.historical_maps_meta = maps_meta
+    st.session_state.historical_maps_meta = all_maps_meta
     st.session_state.historical_hazards = hazards_df
     st.session_state.historical_alerts = alerts_df
     st.session_state.historical_summary = summary
@@ -891,6 +960,10 @@ def _render_live_main(params: dict) -> None:
         "Fixed-grid ionospheric monitoring with hazard detection "
         "and ICAO-style prototype advisories."
     )
+    st.caption(
+        "Fixed map mode uses SERENE API or cached maps only. "
+        "Local sample fallback is disabled."
+    )
 
     _render_cloud_api_hint()
 
@@ -989,6 +1062,12 @@ def _render_historical_main(params: dict) -> None:
     st.caption(
         "Time-window hazard survey — ICAO-style prototype advisories "
         "for academic demonstration only."
+    )
+    st.caption(
+        "Historical analysis is an API/cache replay framework. "
+        "The current SERENE `/api/calc/` endpoint is point-based and does not "
+        "provide confirmed historical map retrieval unless cached or supported "
+        "by future API parameters."
     )
 
     _render_cloud_api_hint()
