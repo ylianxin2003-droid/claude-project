@@ -9,7 +9,7 @@ risk advisories** for academic demonstration.
 ## Main features
 
 - **All Variables Overview** — auto-discovers every variable from SERENE/AIDA and displays summary statistics, per-variable maps, and normalised time series for all variables simultaneously
-- **Dynamic variable discovery** — variables are detected from current DataFrame, local JSON keys, or SERENE `/api/variables/` endpoint with a hardcoded fallback registry
+- **Dynamic variable discovery** — variables are detected from the current API DataFrame, SERENE `/api/variables/` endpoint if available, or the fallback default registry. Sample JSON files are legacy references and are not used by the API-only dashboard.
 - **SERENE API integration** — official `POST /api/calc/` with `Authorization: Token <token>`
 - **2.5° fixed grid maps** — configurable resolution with global and regional grids
 - **Map caching** — automatic Parquet/CSV cache in `data/cache/` to avoid repeated API calls
@@ -60,7 +60,7 @@ map cache     hazard detection   (hazard_detector.py)
 | `visualisation.py` | All Plotly charts |
 | `variable_registry.py` | Centralised variable discovery (5 functions) |
 | `requirements.txt` | Python dependencies |
-| `data/*.json` | Bundled sample data |
+| `data/*.json` | Legacy sample data (not used by API-only workflow) |
 
 ---
 
