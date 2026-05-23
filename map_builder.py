@@ -19,7 +19,7 @@ from serene_client import SereneClient
 logger = logging.getLogger(__name__)
 
 # Standardised output columns (order matches existing data_loader conventions).
-_STANDARD_COLS = ["time", "lat", "lon", "alt", "variable", "value", "model", "region"]
+_STANDARD_COLS = ["time", "lat", "lon", "alt", "variable", "value", "model", "region", "unit", "description"]
 
 
 def build_fixed_map(
@@ -105,7 +105,18 @@ def build_fixed_map(
 
     result = pd.concat(frames, ignore_index=True)
 
-    # ── 4. Standardise columns ────────────────────────────────────────────
+    # ── 4. Filter to the requested variable ───────────────────────────────
+    if variable and "variable" in result.columns:
+        before = len(result)
+        result = result[result["variable"].astype(str).str.lower() == variable.lower()]
+        if result.empty:
+            return pd.DataFrame(), (
+                f"Variable '{variable}' not found in API response "
+                f"({before} row(s) parsed, 0 matched). "
+                "Check that the API returns this variable for the selected model."
+            )
+
+    # ── 5. Standardise columns ────────────────────────────────────────────
     result["region"] = region
     if "model" not in result.columns:
         result["model"] = model
@@ -113,14 +124,17 @@ def build_fixed_map(
         result["alt"] = None
     if "time" not in result.columns:
         result["time"] = timestamp
+    if "unit" not in result.columns:
+        result["unit"] = ""
+    if "description" not in result.columns:
+        result["description"] = ""
 
-    for col in _STANDARD_COLS:
-        if col not in result.columns:
-            result[col] = None
+    # Reorder to standard columns; keep any extra columns that may appear.
+    present = [c for c in _STANDARD_COLS if c in result.columns]
+    extra = [c for c in result.columns if c not in _STANDARD_COLS]
+    result = result[present + extra]
 
-    result = result[_STANDARD_COLS]
-
-    # ── 5. Save to cache ──────────────────────────────────────────────────
+    # ── 6. Save to cache ──────────────────────────────────────────────────
     if use_cache:
         save_cached_map(result, model, variable, timestamp, resolution, region)
 
