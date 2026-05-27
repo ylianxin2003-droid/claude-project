@@ -27,15 +27,21 @@ from grid_generator import list_regions
 from hazard_detector import detect_hazards_from_map
 from historical_runner import list_historical_runs, load_historical_run, run_historical_analysis, save_historical_run
 from map_builder import build_fixed_map
+from map_cache import count_cached_maps, list_cached_maps
 from serene_client import MAX_GRID_POINTS, SereneClient
 from visualisation import (
+    create_advisory_card_html,
     create_alert_summary,
     create_alert_timeline,
     create_fixed_map_plot,
     create_hazard_map_plot,
+    create_hazard_summary_map,
     create_historical_summary_plot,
     create_map_plot,
     create_multi_variable_time_series,
+    create_risk_timeline,
+    create_spatial_gradient_map,
+    create_temporal_change_map,
     create_time_series_plot,
     create_variable_card_data,
     create_variable_map_grid,
@@ -788,8 +794,9 @@ def _render_existing_main(params: dict) -> None:
     var_options = sorted(df["variable"].dropna().unique()) if "variable" in df.columns else []
 
     # ── Tab layout ─────────────────────────────────────────────────────────
-    tab_overview, tab_maps, tab_ts, tab_advisories, tab_raw = st.tabs(
-        ["Overview", "Maps by variable", "Time series", "Advisories", "Raw data"]
+    tab_overview, tab_maps, tab_ts, tab_advisories, tab_raw, tab_system, tab_cache = st.tabs(
+        ["Overview", "Maps by variable", "Time series", "Advisories", "Raw data",
+         "System Overview", "API & Cache Status"]
     )
 
     # ── Tab 1: Overview ────────────────────────────────────────────────────
@@ -919,6 +926,137 @@ def _render_existing_main(params: dict) -> None:
             mime="text/csv",
         )
 
+    # ── Tab 6: System Overview ──────────────────────────────────────────────
+    with tab_system:
+        st.subheader("System overview")
+        st.caption("Snapshot suitable for thesis screenshots and monitoring dashboards.")
+
+        # Top-level metric cards
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Variables monitored", len(var_options))
+        with m2:
+            st.metric("Total data points", f"{len(df):,}")
+        with m3:
+            severe_count = len(alerts[alerts["risk_level"] == "Severe"]) if not alerts.empty and "risk_level" in alerts.columns else 0
+            active_alerts = len(alerts) if not alerts.empty else 0
+            st.metric("Active advisories", active_alerts, delta=f"{severe_count} Severe" if severe_count > 0 else "All clear")
+        with m4:
+            api_status = "Connected" if st.session_state.api_connected else ("Disconnected" if st.session_state.api_connected is False else "Not tested")
+            st.metric("API status", api_status)
+
+        st.markdown("---")
+
+        # Per-variable status cards
+        st.subheader("Per-variable status")
+        if var_options:
+            vcols = st.columns(min(len(var_options), 4))
+            for i, var in enumerate(var_options):
+                var_df = df[df["variable"] == var]
+                vals = pd.to_numeric(var_df["value"], errors="coerce").dropna()
+                if vals.empty:
+                    continue
+                from hazard_detector import _classify_from_thresholds
+                risk = _classify_from_thresholds(float(vals.max()), 0.0, 0.0, var)
+                emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
+                with vcols[i % 4]:
+                    st.metric(
+                        label=f"{emoji.get(risk, '⚪')} {var}",
+                        value=f"{float(vals.mean()):.2f}",
+                        delta=f"max: {float(vals.max()):.2f}",
+                    )
+                    st.caption(f"Risk: {risk}")
+
+        st.markdown("---")
+
+        # Data quality summary
+        st.subheader("Data quality")
+        q1, q2, q3 = st.columns(3)
+        with q1:
+            if "time" in df.columns:
+                tmin = pd.to_datetime(df["time"]).min()
+                tmax = pd.to_datetime(df["time"]).max()
+                st.metric("Time span", f"{(tmax - tmin).total_seconds() / 3600:.1f} h")
+            else:
+                st.metric("Time span", "N/A")
+        with q2:
+            lat_span = f"{df['lat'].min():.1f}° to {df['lat'].max():.1f}°" if "lat" in df.columns else "N/A"
+            st.metric("Latitude range", lat_span)
+        with q3:
+            lon_span = f"{df['lon'].min():.1f}° to {df['lon'].max():.1f}°" if "lon" in df.columns else "N/A"
+            st.metric("Longitude range", lon_span)
+
+        # Risk relevance breakdown
+        st.subheader("Risk relevance breakdown")
+        from hazard_detector import _hazard_type_for
+        relevance_counts: dict[str, int] = {}
+        for var in var_options:
+            ht = _hazard_type_for(var)
+            relevance_counts[ht] = relevance_counts.get(ht, 0) + 1
+        if relevance_counts:
+            rel_df = pd.DataFrame(
+                [{"Risk category": k, "Variables": v} for k, v in relevance_counts.items()]
+            )
+            st.dataframe(rel_df, use_container_width=True, hide_index=True)
+
+    # ── Tab 7: API & Cache Status ───────────────────────────────────────────
+    with tab_cache:
+        st.subheader("API & Cache Status")
+
+        # API endpoint status
+        st.markdown("### SERENE API endpoint")
+        c_api1, c_api2, c_api3 = st.columns(3)
+        with c_api1:
+            if st.session_state.api_connected is True:
+                st.success("Connected")
+            elif st.session_state.api_connected is False:
+                st.error("Failed")
+            else:
+                st.info("Not tested")
+        with c_api2:
+            st.metric("Base URL", st.session_state.api_message if st.session_state.api_connected else "—")
+        with c_api3:
+            st.metric("Token configured", "Yes" if SERENE_API_TOKEN else "No")
+
+        st.markdown("---")
+
+        # Cache listing
+        st.markdown("### Map cache")
+        cache_stats = count_cached_maps()
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            st.metric("Cached maps", cache_stats["count"])
+        with cc2:
+            st.metric("Total size", cache_stats["readable_size"])
+        with cc3:
+            st.metric("Cache directory", "data/cache/")
+
+        cache_maps = list_cached_maps()
+        if cache_maps:
+            cache_df = pd.DataFrame(cache_maps)
+            show_cache_cols = [c for c in ("model", "variable", "timestamp", "region", "resolution", "file_size") if c in cache_df.columns]
+            # Make file_size human-readable
+            if "file_size" in cache_df.columns:
+                cache_df["file_size"] = cache_df["file_size"].apply(
+                    lambda b: f"{b/1024:.1f} KB" if b < 1024*1024 else f"{b/(1024*1024):.1f} MB"
+                )
+            st.dataframe(cache_df[show_cache_cols], use_container_width=True, height=250)
+            st.caption(f"{len(cache_maps)} cached file(s)")
+        else:
+            st.info("No cached maps. Cache files are created automatically when building fixed maps.")
+
+        st.markdown("---")
+
+        # Data source info
+        st.markdown("### Data source")
+        st.json({
+            "source": st.session_state.status.source,
+            "message": st.session_state.status.message,
+            "warnings": st.session_state.status.warnings,
+            "api_only": True,
+            "local_fallback": "disabled",
+        })
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main page — Live fixed map mode
@@ -959,68 +1097,103 @@ def _render_live_main(params: dict) -> None:
 
     # Variable summary if multi-variable
     live_vars = sorted(map_df["variable"].dropna().unique()) if "variable" in map_df.columns else []
-    if len(live_vars) > 1:
-        st.subheader("Variable summary")
-        st.dataframe(create_variable_summary_table(map_df), use_container_width=True, hide_index=True)
 
-    # Fixed map plot — per variable in expanders
-    st.subheader("Fixed grid maps")
-    for var in live_vars:
-        with st.expander(f"Map — {var}", expanded=(len(live_vars) <= 2)):
-            st.plotly_chart(
-                create_fixed_map_plot(map_df, variable=var, title=f"Fixed grid — {var}"),
-                use_container_width=True,
-                key=f"live_fixed_map_{var}",
+    tab_live_maps, tab_live_hazards, tab_live_advisories = st.tabs(
+        ["Fixed maps", "Hazard detection", "ICAO-style advisories"]
+    )
+
+    # ── Tab 1: Fixed maps ──────────────────────────────────────────────────
+    with tab_live_maps:
+        if len(live_vars) > 1:
+            st.subheader("Variable summary")
+            st.dataframe(create_variable_summary_table(map_df), use_container_width=True, hide_index=True)
+
+        st.subheader("Fixed grid maps")
+        for var in live_vars:
+            with st.expander(f"Map — {var}", expanded=(len(live_vars) <= 2)):
+                st.plotly_chart(
+                    create_fixed_map_plot(map_df, variable=var, title=f"Fixed grid — {var}"),
+                    use_container_width=True,
+                    key=f"live_fixed_map_{var}",
+                )
+
+    # ── Tab 2: Hazard detection ─────────────────────────────────────────────
+    with tab_live_hazards:
+        hazards = st.session_state.live_hazards
+        st.subheader("Hazard detection")
+
+        if hazards.empty:
+            st.success("No hazards detected — all parameters within normal range.")
+        else:
+            # Hazard sub-tabs for different views
+            htab_map, htab_gradient, htab_change, htab_table = st.tabs(
+                ["Hazard map", "Spatial gradient", "Temporal change", "Summary table"]
             )
 
-    st.markdown("---")
+            with htab_map:
+                st.plotly_chart(
+                    create_hazard_summary_map(hazards),
+                    use_container_width=True,
+                    key="live_hazard_summary_map",
+                )
 
-    # Hazard detection results
-    hazards = st.session_state.live_hazards
-    st.subheader("Hazard detection")
-    if hazards.empty:
-        st.success("No hazards detected — all parameters within normal range.")
-    else:
-        col_h1, col_h2 = st.columns(2)
-        with col_h1:
-            st.plotly_chart(
-                create_hazard_map_plot(hazards),
-                use_container_width=True,
-                key="live_hazard_map",
-            )
-        with col_h2:
-            st.dataframe(
-                hazards[[
+            with htab_gradient:
+                for var in live_vars:
+                    st.plotly_chart(
+                        create_spatial_gradient_map(map_df, variable=var, title=f"Spatial gradient — {var}"),
+                        use_container_width=True,
+                        key=f"live_gradient_{var}",
+                    )
+
+            with htab_change:
+                for var in live_vars:
+                    st.plotly_chart(
+                        create_temporal_change_map(map_df, variable=var, title=f"Temporal change rate — {var}"),
+                        use_container_width=True,
+                        key=f"live_change_{var}",
+                    )
+
+            with htab_table:
+                show_cols = [
                     c for c in ("variable", "hazard_type", "risk_level", "max_value",
                                 "max_gradient", "max_change_rate", "reason")
                     if c in hazards.columns
-                ]],
-                use_container_width=True,
-                height=300,
-            )
+                ]
+                st.dataframe(hazards[show_cols], use_container_width=True, height=350)
+                st.caption(f"{len(hazards)} hazard record(s)")
 
-    st.markdown("---")
+    # ── Tab 3: ICAO-style advisories ────────────────────────────────────────
+    with tab_live_advisories:
+        alerts = st.session_state.live_alerts
+        st.subheader("ICAO-style prototype advisories")
+        st.caption(DISCLAIMER)
 
-    # ICAO-style prototype advisories
-    alerts = st.session_state.live_alerts
-    st.subheader("ICAO-style prototype advisories")
-    st.caption(DISCLAIMER)
-    if alerts.empty:
-        st.success("No active prototype advisories.")
-    else:
-        overall, summary = generate_overall_risk(alerts)
-        emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
-        st.markdown(f"**Overall risk:** {emoji.get(overall, '⚪')} {overall}")
-        st.caption(summary)
+        if alerts.empty:
+            st.success("No active prototype advisories.")
+        else:
+            overall, summary = generate_overall_risk(alerts)
+            emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
+            st.markdown(f"**Overall risk:** {emoji.get(overall, '⚪')} {overall}")
+            st.caption(summary)
 
-        show_cols = [
-            c for c in (
-                "timestamp", "region", "alert_type", "risk_level",
-                "reason", "possible_aviation_impact", "interpretation",
-            )
-            if c in alerts.columns
-        ]
-        st.dataframe(alerts[show_cols], use_container_width=True, height=220)
+            # Table view
+            show_cols = [
+                c for c in (
+                    "timestamp", "region", "alert_type", "risk_level",
+                    "reason", "possible_aviation_impact", "interpretation",
+                )
+                if c in alerts.columns
+            ]
+            st.dataframe(alerts[show_cols], use_container_width=True, height=220)
+
+            st.markdown("---")
+            # Advisory cards
+            st.subheader("Advisory cards")
+            for _, row in alerts.iterrows():
+                st.markdown(
+                    create_advisory_card_html(row.to_dict()),
+                    unsafe_allow_html=True,
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1089,60 +1262,91 @@ def _render_historical_main(params: dict) -> None:
     alerts_df = st.session_state.historical_alerts
     hazards_df = st.session_state.historical_hazards
 
-    # Alert timeline
-    st.subheader("Alert timeline")
-    st.plotly_chart(
-        create_alert_timeline(alerts_df) if not alerts_df.empty else _empty_plot("No alerts in this run."),
-        use_container_width=True,
-        key="hist_timeline",
+    tab_hist_summary, tab_hist_risk, tab_hist_alert, tab_hist_hazards, tab_hist_advisories = st.tabs(
+        ["Summary", "Risk timeline", "Alert timeline", "Hazard details", "Advisories"]
     )
 
-    # Historical summary
-    st.subheader("Historical summary")
-    if alerts_df.empty:
-        st.success("No prototype advisories generated — all timestamps within normal range.")
-    else:
-        st.plotly_chart(
-            create_historical_summary_plot(alerts_df),
-            use_container_width=True,
-            key="hist_summary_plot",
-        )
-
-        overall, overall_msg = generate_overall_risk(alerts_df)
-        emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
-        st.markdown(f"**Peak risk across window:** {emoji.get(overall, '⚪')} {overall}")
-        st.caption(overall_msg)
-
-    st.markdown("---")
-
-    # Hazards table
-    st.subheader("Hazard records")
-    if hazards_df.empty:
-        st.info("No hazard records.")
-    else:
-        show_cols = [
-            c for c in (
-                "timestamp", "region", "variable", "hazard_type", "risk_level",
-                "max_value", "max_gradient", "max_change_rate", "reason",
+    # ── Tab 1: Summary ─────────────────────────────────────────────────────
+    with tab_hist_summary:
+        st.subheader("Historical summary")
+        if alerts_df.empty:
+            st.success("No prototype advisories generated — all timestamps within normal range.")
+        else:
+            st.plotly_chart(
+                create_historical_summary_plot(alerts_df),
+                use_container_width=True,
+                key="hist_summary_plot",
             )
-            if c in hazards_df.columns
-        ]
-        st.dataframe(hazards_df[show_cols], use_container_width=True, height=250)
 
-    # Alerts table
-    st.subheader("ICAO-style prototype advisories")
-    st.caption(DISCLAIMER)
-    if alerts_df.empty:
-        st.success("No advisories generated.")
-    else:
-        show_cols = [
-            c for c in (
-                "timestamp", "region", "alert_type", "risk_level",
-                "reason", "possible_aviation_impact", "interpretation",
+            overall, overall_msg = generate_overall_risk(alerts_df)
+            emoji = {"Normal": "🟢", "Watch": "🟡", "Warning": "🟠", "Severe": "🔴"}
+            st.markdown(f"**Peak risk across window:** {emoji.get(overall, '⚪')} {overall}")
+            st.caption(overall_msg)
+
+    # ── Tab 2: Risk timeline ───────────────────────────────────────────────
+    with tab_hist_risk:
+        st.subheader("Risk level timeline")
+        if hazards_df.empty:
+            st.info("No hazard data for risk timeline.")
+        else:
+            st.plotly_chart(
+                create_risk_timeline(hazards_df, title="Risk level over time"),
+                use_container_width=True,
+                key="hist_risk_timeline",
             )
-            if c in alerts_df.columns
-        ]
-        st.dataframe(alerts_df[show_cols], use_container_width=True, height=250)
+
+    # ── Tab 3: Alert timeline ───────────────────────────────────────────────
+    with tab_hist_alert:
+        st.subheader("Alert timeline")
+        if alerts_df.empty:
+            st.info("No alerts in this run.")
+        else:
+            st.plotly_chart(
+                create_alert_timeline(alerts_df),
+                use_container_width=True,
+                key="hist_timeline",
+            )
+
+    # ── Tab 4: Hazard details ───────────────────────────────────────────────
+    with tab_hist_hazards:
+        st.subheader("Hazard records")
+        if hazards_df.empty:
+            st.info("No hazard records.")
+        else:
+            show_cols = [
+                c for c in (
+                    "timestamp", "region", "variable", "hazard_type", "risk_level",
+                    "max_value", "max_gradient", "max_change_rate", "reason",
+                )
+                if c in hazards_df.columns
+            ]
+            st.dataframe(hazards_df[show_cols], use_container_width=True, height=350)
+            st.caption(f"{len(hazards_df)} hazard record(s)")
+
+    # ── Tab 5: Advisories ──────────────────────────────────────────────────
+    with tab_hist_advisories:
+        st.subheader("ICAO-style prototype advisories")
+        st.caption(DISCLAIMER)
+        if alerts_df.empty:
+            st.success("No advisories generated.")
+        else:
+            show_cols = [
+                c for c in (
+                    "timestamp", "region", "alert_type", "risk_level",
+                    "reason", "possible_aviation_impact", "interpretation",
+                )
+                if c in alerts_df.columns
+            ]
+            st.dataframe(alerts_df[show_cols], use_container_width=True, height=250)
+
+            # Advisory cards
+            st.markdown("---")
+            st.subheader("Advisory cards")
+            for _, row in alerts_df.head(20).iterrows():
+                st.markdown(
+                    create_advisory_card_html(row.to_dict()),
+                    unsafe_allow_html=True,
+                )
 
 
 def _empty_plot(message: str) -> object:

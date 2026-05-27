@@ -103,6 +103,74 @@ def load_cached_map(
     return pd.DataFrame()
 
 
+def list_cached_maps() -> list[dict[str, object]]:
+    """List all cached maps with metadata.
+
+    Returns a list of dicts with keys: model, variable, timestamp, resolution,
+    region, file_size, file_path.
+    """
+    _ensure_cache_dir()
+    results: list[dict[str, object]] = []
+    if not _CACHE_ROOT.exists():
+        return results
+
+    for path in sorted(_CACHE_ROOT.iterdir()):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in (".parquet", ".csv"):
+            continue
+        stem = path.stem
+        parts = stem.split("_")
+        # Expected format: model_variable_timestamp_resolution_region
+        if len(parts) < 5:
+            continue
+        try:
+            region = parts[-1]
+            resolution = float(parts[-2])
+            timestamp = parts[-3].replace("-", ":")
+            # variable and model may contain underscores — rejoin
+            variable = parts[-4]
+            model = "_".join(parts[:-4])
+            file_size = path.stat().st_size
+            results.append({
+                "model": model,
+                "variable": variable,
+                "timestamp": timestamp,
+                "resolution": resolution,
+                "region": region,
+                "file_size": file_size,
+                "file_path": str(path),
+            })
+        except (ValueError, IndexError):
+            continue
+
+    return results
+
+
+def count_cached_maps() -> dict[str, object]:
+    """Return cache statistics: total count and total size in bytes.
+
+    Returns a dict with keys: count, total_size, readable_size.
+    """
+    maps = list_cached_maps()
+    total_size = sum(m.get("file_size", 0) for m in maps)  # type: ignore[arg-type]
+    # Human-readable size
+    if total_size < 1024:
+        readable = f"{total_size} B"
+    elif total_size < 1024 * 1024:
+        readable = f"{total_size / 1024:.1f} KB"
+    elif total_size < 1024 * 1024 * 1024:
+        readable = f"{total_size / (1024 * 1024):.1f} MB"
+    else:
+        readable = f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+    return {
+        "count": len(maps),
+        "total_size": total_size,
+        "readable_size": readable,
+    }
+
+
 def save_cached_map(
     df: pd.DataFrame,
     model: str,

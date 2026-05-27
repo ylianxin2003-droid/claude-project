@@ -802,6 +802,359 @@ def create_variable_card_data(df: pd.DataFrame) -> list[dict[str, object]]:
     return cards
 
 
+# ── Risk timeline ────────────────────────────────────────────────────────────
+
+
+def create_risk_timeline(
+    hazards_df: pd.DataFrame,
+    title: str | None = None,
+) -> go.Figure:
+    """Line chart of risk level over time per variable.
+
+    Each risk level is mapped to a numeric Y value (Normal=0, Watch=1,
+    Warning=2, Severe=3) and plotted as a stepped line.
+
+    Parameters
+    ----------
+    hazards_df : pd.DataFrame
+        Must contain ``timestamp``, ``variable``, ``risk_level`` columns.
+    title : str, optional
+        Chart title.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    if hazards_df.empty:
+        return empty_figure("No hazard data for risk timeline.")
+
+    needed = {"timestamp", "variable", "risk_level"}
+    if not needed.issubset(hazards_df.columns):
+        return empty_figure("Hazard data missing required columns (timestamp, variable, risk_level).")
+
+    risk_value = {"Normal": 0, "Watch": 1, "Warning": 2, "Severe": 3}
+
+    work = hazards_df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work = work.dropna(subset=["timestamp"])
+    work["risk_num"] = work["risk_level"].map(risk_value).fillna(0)
+    work = work.sort_values("timestamp")
+
+    fig = go.Figure()
+    for var in sorted(work["variable"].dropna().unique()):
+        var_df = work[work["variable"] == var]
+        fig.add_trace(go.Scatter(
+            x=var_df["timestamp"],
+            y=var_df["risk_num"],
+            mode="lines+markers",
+            name=var,
+            line=dict(shape="hv"),
+            marker=dict(size=10),
+        ))
+
+    fig.update_yaxes(
+        tickvals=[0, 1, 2, 3],
+        ticktext=["Normal", "Watch", "Warning", "Severe"],
+    )
+    fig.update_layout(
+        title=title or "Risk level timeline by variable",
+        xaxis_title="Time",
+        yaxis_title="Risk level",
+        template="plotly_white",
+        height=450,
+        hovermode="x unified",
+    )
+    return fig
+
+
+def create_hazard_summary_map(
+    hazards_df: pd.DataFrame,
+    title: str | None = None,
+) -> go.Figure:
+    """Scatter-geo map of detected hazards colour-coded by risk level.
+
+    Parameters
+    ----------
+    hazards_df : pd.DataFrame
+        Must contain ``region``, ``risk_level``, ``variable`` columns.
+    title : str, optional
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    if hazards_df.empty:
+        return empty_figure("No hazards to display on map.")
+
+    from grid_generator import region_bounds
+
+    colors = {"Normal": "#2ecc71", "Watch": "#f1c40f", "Warning": "#e67e22", "Severe": "#e74c3c"}
+
+    fig = go.Figure()
+    seen: set[tuple[str, str, str]] = set()
+    for _, row in hazards_df.iterrows():
+        region_name = str(row.get("region", "global"))
+        var = str(row.get("variable", "?"))
+        risk = str(row.get("risk_level", "Normal"))
+        key = (region_name, var, risk)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        bounds = region_bounds(region_name)
+        if bounds is None:
+            bounds = region_bounds("global")
+        center_lat = (bounds["lat_min"] + bounds["lat_max"]) / 2
+        center_lon = (bounds["lon_min"] + bounds["lon_max"]) / 2
+
+        fig.add_trace(go.Scattergeo(
+            lon=[center_lon],
+            lat=[center_lat],
+            mode="markers+text",
+            marker=dict(
+                size=16,
+                color=colors.get(risk, "#95a5a6"),
+                symbol="diamond",
+                line=dict(width=1, color="black"),
+            ),
+            text=var,
+            textposition="top center",
+            name=f"{var} — {risk}",
+            hovertext=(
+                f"Region: {region_name}<br>"
+                f"Variable: {var}<br>"
+                f"Risk: {risk}<br>"
+                f"Value: {row.get('max_value', '?')}<br>"
+                f"Reason: {row.get('reason', '')}"
+            ),
+            hoverinfo="text",
+            showlegend=False,
+        ))
+
+    fig.update_geos(
+        showcoastlines=True, coastlinecolor="gray",
+        showland=True, landcolor="lightgray",
+        showocean=True, oceancolor="aliceblue",
+    )
+    fig.update_layout(
+        title=title or "Hazard summary map",
+        template="plotly_white",
+        height=500,
+    )
+
+    # Add legend manually
+    for level, color in colors.items():
+        fig.add_trace(go.Scattergeo(
+            lon=[None], lat=[None],
+            mode="markers",
+            marker=dict(size=12, color=color, symbol="diamond"),
+            name=level,
+            showlegend=True,
+        ))
+
+    return fig
+
+
+def create_spatial_gradient_map(
+    df: pd.DataFrame,
+    variable: str | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Heatmap of spatial gradient magnitude on a map.
+
+    Computes spatial gradients for the given variable, then renders a
+    scatter-geo map where marker color encodes gradient magnitude.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain ``lat``, ``lon``, ``variable``, ``value`` columns.
+    variable : str, optional
+        Filter to one variable.
+    title : str, optional
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    from hazard_detector import _compute_spatial_gradients
+
+    if df.empty:
+        return empty_figure("No data for spatial gradient map.")
+
+    work = df.copy()
+    if variable and "variable" in work.columns:
+        work = work[work["variable"] == variable]
+
+    if work.empty:
+        return empty_figure(f"No data for variable '{variable}'.")
+
+    if "spatial_gradient" not in work.columns:
+        try:
+            work = _compute_spatial_gradients(work)
+        except Exception:
+            return empty_figure("Could not compute spatial gradients.")
+
+    work = work.dropna(subset=["spatial_gradient"])
+    if work.empty:
+        return empty_figure("No spatial gradient data after computation.")
+
+    if len(work) > 3000:
+        work = work.sample(n=3000, random_state=42)
+
+    var_label = variable or "all variables"
+    fig = px.scatter_geo(
+        work,
+        lat="lat",
+        lon="lon",
+        color="spatial_gradient",
+        size="spatial_gradient",
+        color_continuous_scale="RdYlBu_r",
+        title=title or f"Spatial gradient — {var_label}",
+        projection="natural earth",
+        labels={"spatial_gradient": "Gradient (value/deg)"},
+    )
+    fig.update_geos(
+        showcoastlines=True, coastlinecolor="gray",
+        showland=True, landcolor="lightgray",
+        showocean=True, oceancolor="aliceblue",
+    )
+    fig.update_layout(template="plotly_white", height=500)
+    return fig
+
+
+def create_temporal_change_map(
+    current_df: pd.DataFrame,
+    previous_df: pd.DataFrame | None = None,
+    variable: str | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Heatmap of temporal change rate on a map.
+
+    If *previous_df* is provided, computes the absolute value difference per
+    hour between the current and previous map. Otherwise shows a placeholder.
+
+    Parameters
+    ----------
+    current_df : pd.DataFrame
+        Must contain ``lat``, ``lon``, ``variable``, ``value``, ``time``.
+    previous_df : pd.DataFrame or None
+        Previous time-step data for comparison.
+    variable : str, optional
+    title : str, optional
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    from hazard_detector import _compute_temporal_change
+
+    if current_df.empty:
+        return empty_figure("No data for temporal change map.")
+
+    work = current_df.copy()
+    if variable and "variable" in work.columns:
+        work = work[work["variable"] == variable]
+
+    if work.empty:
+        return empty_figure(f"No data for variable '{variable}'.")
+
+    work = _compute_temporal_change(work, previous_df)
+
+    if "temporal_change" not in work.columns or work["temporal_change"].max() == 0:
+        return empty_figure(
+            "No temporal change detected — either no previous data for comparison "
+            "or all changes are zero."
+        )
+
+    work = work.dropna(subset=["temporal_change"])
+    if len(work) > 3000:
+        work = work.sample(n=3000, random_state=42)
+
+    var_label = variable or "all variables"
+    fig = px.scatter_geo(
+        work,
+        lat="lat",
+        lon="lon",
+        color="temporal_change",
+        size="temporal_change",
+        color_continuous_scale="OrRd",
+        title=title or f"Temporal change rate — {var_label}",
+        projection="natural earth",
+        labels={"temporal_change": "Change rate (value/hr)"},
+    )
+    fig.update_geos(
+        showcoastlines=True, coastlinecolor="gray",
+        showland=True, landcolor="lightgray",
+        showocean=True, oceancolor="aliceblue",
+    )
+    fig.update_layout(template="plotly_white", height=500)
+    return fig
+
+
+def create_advisory_card_html(advisory: dict[str, object]) -> str:
+    """Render a single ICAO-style prototype advisory as an HTML card.
+
+    Parameters
+    ----------
+    advisory : dict
+        Keys: timestamp, region, variable, alert_type, risk_level, reason,
+        possible_aviation_impact, interpretation, disclaimer.
+
+    Returns
+    -------
+    str
+        HTML string suitable for ``st.markdown(..., unsafe_allow_html=True)``.
+    """
+    risk = str(advisory.get("risk_level", "Normal"))
+    colors = {
+        "Normal": ("#2ecc71", "#1a7a3a"),
+        "Watch": ("#f1c40f", "#8a6d00"),
+        "Warning": ("#e67e22", "#8a3d00"),
+        "Severe": ("#e74c3c", "#8a1c1c"),
+    }
+    bg, border = colors.get(risk, ("#95a5a6", "#555"))
+
+    timestamp = advisory.get("timestamp", "—")
+    region = advisory.get("region", "—")
+    variable = advisory.get("variable", "—")
+    alert_type = advisory.get("alert_type", "—")
+    reason = advisory.get("reason", "—")
+    impact = advisory.get("possible_aviation_impact", "—")
+    interpretation = advisory.get("interpretation", "—")
+    disclaimer = advisory.get("disclaimer", "")
+
+    return f"""
+<div style="
+    border-left: 5px solid {border};
+    background: {bg}15;
+    padding: 16px;
+    margin: 10px 0;
+    border-radius: 6px;
+">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <span style="font-weight: bold; font-size: 1.1em; color: {border};">{alert_type}</span>
+        <span style="
+            background: {bg}; color: white; padding: 3px 12px;
+            border-radius: 12px; font-weight: bold; font-size: 0.85em;
+        ">{risk.upper()}</span>
+    </div>
+    <table style="width: 100%; font-size: 0.9em; border-collapse: collapse;">
+        <tr><td style="color: #7f8c8d; width: 100px;">Timestamp</td><td>{timestamp}</td></tr>
+        <tr><td style="color: #7f8c8d;">Region</td><td>{region}</td></tr>
+        <tr><td style="color: #7f8c8d;">Variable</td><td>{variable}</td></tr>
+        <tr><td style="color: #7f8c8d;">Reason</td><td>{reason}</td></tr>
+    </table>
+    <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+        <strong>Aviation impact:</strong> {impact}<br>
+        <strong>Interpretation:</strong> {interpretation}
+    </div>
+    <div style="margin-top: 8px; font-size: 0.78em; color: #7f8c8d; font-style: italic;">
+        {disclaimer}
+    </div>
+</div>"""
+
+
 # ── Utility ─────────────────────────────────────────────────────────────────
 
 
