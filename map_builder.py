@@ -31,6 +31,7 @@ def build_fixed_map(
     use_cache: bool = True,
     force_refresh: bool = False,
     max_points: int = 500,
+    allow_api: bool = True,
 ) -> tuple[pd.DataFrame, str]:
     """Build a fixed-resolution grid map for a single *variable*.
 
@@ -54,6 +55,9 @@ def build_fixed_map(
     max_points : int
         Maximum grid points allowed when cache is unavailable (default 500).
         Exceeding this returns an empty DataFrame with a status message.
+    allow_api : bool
+        If ``False``, skip live SERENE API calls entirely — cache-only mode.
+        Cache misses return an empty DataFrame.
 
     Returns
     -------
@@ -67,7 +71,15 @@ def build_fixed_map(
         if not df.empty:
             return df, f"Loaded from cache ({len(df)} rows)."
 
-    # ── 1a. Token check ───────────────────────────────────────────────────
+    # ── 1a. Cache-only mode — no API allowed ───────────────────────────────
+    if not allow_api:
+        return pd.DataFrame(), (
+            f"No cached map found for {variable} at {timestamp}. "
+            "Historical replay is set to cache-only mode. "
+            "Enable 'Allow live API requests' in the sidebar to call SERENE API."
+        )
+
+    # ── 1b. Token check ───────────────────────────────────────────────────
     if not SERENE_API_TOKEN:
         return pd.DataFrame(), (
             "SERENE API token is not configured. "

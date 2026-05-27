@@ -539,6 +539,22 @@ def _render_historical_sidebar() -> dict:
     params["use_cache"] = st.sidebar.checkbox("Use cache", value=True, key="hist_use_cache")
     params["force_refresh"] = st.sidebar.checkbox("Force refresh", value=False, key="hist_force")
 
+    # ── Cache-only / live API toggle ──────────────────────────────────────
+    params["allow_live_api"] = st.sidebar.checkbox(
+        "Allow live API requests for missing historical cache",
+        value=False,
+        key="hist_allow_api",
+        help=(
+            "When disabled (default), historical analysis only reads precomputed cache. "
+            "When enabled, live SERENE /api/calc/ calls are made for timestamps without cache."
+        ),
+    )
+    if params["allow_live_api"]:
+        st.sidebar.warning(
+            "⚠️ **Current SERENE /api/calc/ does not accept historical time parameters.** "
+            "API requests will return current point calculations, not confirmed retrospective data."
+        )
+
     # ── Load previous run ──────────────────────────────────────────────────
     saved_runs = list_historical_runs()
     if saved_runs:
@@ -581,8 +597,9 @@ def _render_historical_sidebar() -> dict:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
-        "Historical analysis uses cached data when available. "
-        "SERENE API currently returns real-time data only."
+        "Historical analysis is an API/cache replay framework. "
+        "The current SERENE /api/calc/ endpoint is point-based and does not provide "
+        "confirmed retrospective retrieval unless a historical endpoint or archived data is available."
     )
     return params
 
@@ -594,15 +611,55 @@ def _run_historical(params: dict) -> None:
     if isinstance(variables, str):
         variables = [variables]
 
-    # ── Safety checks ────────────────────────────────────────────────────
     use_cache = params.get("use_cache", True)
     force_refresh = params.get("force_refresh", False)
+    allow_live_api = params.get("allow_live_api", False)
 
-    # No token + no cache = cannot run.
-    if not SERENE_API_TOKEN and (force_refresh or not use_cache):
+    # ── Cache availability pre-check ──────────────────────────────────────
+    from map_cache import cache_exists as _ce
+    timestamps_dt = list(pd.date_range(
+        pd.to_datetime(params["start_time"]),
+        pd.to_datetime(params["end_time"]),
+        freq=f"{params['time_step']}h",
+    ))
+
+    if not force_refresh and use_cache and not allow_live_api:
+        cached_count = 0
+        total_checks = len(timestamps_dt) * len(variables)
+        for var in variables:
+            for ts_dt in timestamps_dt:
+                ts_str = ts_dt.strftime("%Y-%m-%dT%H:%M:%S")
+                if _ce(params["model"], var, ts_str, params["resolution"], params["region"]):
+                    cached_count += 1
+
+        if cached_count == 0:
+            st.error(
+                "**No cached maps found for the selected historical window.** "
+                "Historical replay requires precomputed cache. "
+                "Enable **Allow live API requests for missing historical cache** "
+                "in the sidebar to call SERENE API for missing timestamps.\n\n"
+                "Note: the current SERENE /api/calc/ endpoint does not accept "
+                "historical time parameters — API results will be current data, "
+                "not confirmed retrospective data."
+            )
+            st.session_state.historical_maps_meta = []
+            st.session_state.historical_hazards = pd.DataFrame()
+            st.session_state.historical_alerts = pd.DataFrame()
+            st.session_state.historical_summary = None
+            return
+        elif cached_count < total_checks:
+            st.info(
+                f"**{cached_count}/{total_checks} timestamp(s) have cache.** "
+                f"{total_checks - cached_count} timestamp(s) will be skipped. "
+                "Enable live API to attempt SERENE requests for missing timestamps."
+            )
+
+    # ── Token check for API mode ──────────────────────────────────────────
+    if allow_live_api and not SERENE_API_TOKEN:
         st.error(
-            "**Historical analysis requires SERENE API access or precomputed cache.** "
-            "Local file fallback is disabled."
+            "**SERENE API token is not configured.** "
+            "Cannot make live API requests without a token. "
+            "Disable live API to use cache-only mode."
         )
         st.session_state.historical_maps_meta = []
         st.session_state.historical_hazards = pd.DataFrame()
@@ -610,17 +667,14 @@ def _run_historical(params: dict) -> None:
         st.session_state.historical_summary = None
         return
 
+    # ── Request estimation for API mode ───────────────────────────────────
     from grid_generator import generate_region_grid
     grid_df = generate_region_grid(params["region"], resolution=params["resolution"])
     est_points = len(grid_df)
-    time_steps = len(pd.date_range(
-        pd.to_datetime(params["start_time"]),
-        pd.to_datetime(params["end_time"]),
-        freq=f"{params['time_step']}h",
-    ))
+    time_steps = len(timestamps_dt)
     estimated_requests = est_points * time_steps * len(variables)
 
-    if estimated_requests > 1000:
+    if allow_live_api and estimated_requests > 1000:
         st.error(
             f"**Estimated API requests = {estimated_requests}.** "
             "Historical analysis is too large for point-based API. "
@@ -632,6 +686,18 @@ def _run_historical(params: dict) -> None:
         st.session_state.historical_summary = None
         return
 
+    # ── Run with progress bar ─────────────────────────────────────────────
+    total_steps = time_steps * len(variables)
+    progress_bar = st.progress(0.0, text=f"Starting historical analysis ({total_steps} step(s))…")
+    progress_state: dict[str, int] = {"done": 0}
+
+    def _on_step(done: int, total: int, status: str) -> None:
+        progress_state["done"] = done
+        progress_bar.progress(
+            done / max(total, 1),
+            text=f"{status} ({done}/{total})",
+        )
+
     all_hazards: list[pd.DataFrame] = []
     all_alerts: list[pd.DataFrame] = []
     all_maps_meta: list[dict] = []
@@ -641,22 +707,23 @@ def _run_historical(params: dict) -> None:
     all_messages: list[str] = []
 
     for var in variables:
-        with st.spinner(f"Running historical analysis for {var}…"):
-            try:
-                maps_meta, hazards_df, alerts_df, summary = run_historical_analysis(
-                    model=params["model"],
-                    variable=var,
-                    start_time=params["start_time"],
-                    end_time=params["end_time"],
-                    time_step_hours=params["time_step"],
-                    region=params["region"],
-                    resolution=params["resolution"],
-                    use_cache=params["use_cache"],
-                    force_refresh=params["force_refresh"],
-                )
-            except Exception as exc:
-                st.error(f"Historical analysis failed for {var}: {exc}")
-                continue
+        try:
+            maps_meta, hazards_df, alerts_df, summary = run_historical_analysis(
+                model=params["model"],
+                variable=var,
+                start_time=params["start_time"],
+                end_time=params["end_time"],
+                time_step_hours=params["time_step"],
+                region=params["region"],
+                resolution=params["resolution"],
+                use_cache=params["use_cache"],
+                force_refresh=params["force_refresh"],
+                allow_api=allow_live_api,
+                progress_callback=_on_step,
+            )
+        except Exception as exc:
+            st.error(f"Historical analysis failed for {var}: {exc}")
+            continue
 
         if summary is not None:
             all_hazards.append(hazards_df)
@@ -666,6 +733,9 @@ def _run_historical(params: dict) -> None:
             total_cache += summary.cache_hits
             total_fail += summary.failures
             all_messages.extend(summary.messages)
+
+    progress_bar.progress(1.0, text="Complete")
+    progress_bar.empty()
 
     if all_hazards:
         hazards_df = pd.concat(all_hazards, ignore_index=True)
@@ -1209,9 +1279,8 @@ def _render_historical_main(params: dict) -> None:
     )
     st.caption(
         "Historical analysis is an API/cache replay framework. "
-        "The current SERENE `/api/calc/` endpoint is point-based and does not "
-        "provide confirmed historical map retrieval unless cached or supported "
-        "by future API parameters."
+        "The current SERENE /api/calc/ endpoint is point-based and does not provide "
+        "confirmed retrospective retrieval unless a historical endpoint or archived data is available."
     )
 
     _render_cloud_api_hint()

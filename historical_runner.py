@@ -61,6 +61,8 @@ def run_historical_analysis(
     resolution: float = MAP_RESOLUTION_DEFAULT,
     use_cache: bool = True,
     force_refresh: bool = False,
+    allow_api: bool = False,
+    progress_callback: Any | None = None,
 ) -> tuple[list[dict[str, Any]], pd.DataFrame, pd.DataFrame, RunSummary]:
     """Run hazard detection across a historical time window.
 
@@ -84,6 +86,13 @@ def run_historical_analysis(
         Prefer cached maps when available.
     force_refresh : bool
         Ignore cache and re-fetch from the API.
+    allow_api : bool
+        When ``False`` (default), historical replay is cache-only;
+        timestamps without a cached map are skipped.  When ``True``, live
+        SERENE API calls are permitted for missing timestamps.
+    progress_callback : callable or None
+        ``(done: int, total: int, status: str)`` — called after each
+        timestamp step.
 
     Returns
     -------
@@ -110,13 +119,20 @@ def run_historical_analysis(
         timestamps.append(current)
         current += timedelta(hours=time_step_hours)
 
+    total_steps = len(timestamps)
     maps_meta: list[dict[str, Any]] = []
     all_hazards: list[pd.DataFrame] = []
     all_alerts: list[pd.DataFrame] = []
     previous_map: pd.DataFrame | None = None
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 3
 
-    for ts in timestamps:
+    for idx, ts in enumerate(timestamps):
         ts_str = ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+        if progress_callback:
+            progress_callback(idx, total_steps, f"[{idx + 1}/{total_steps}] {ts_str} — {variable}")
+
         try:
             map_df, msg = build_fixed_map(
                 model=model,
@@ -126,25 +142,43 @@ def run_historical_analysis(
                 resolution=resolution,
                 use_cache=use_cache,
                 force_refresh=force_refresh,
+                allow_api=allow_api,
             )
         except Exception as exc:
             summary.failures += 1
+            consecutive_failures += 1
             summary.messages.append(f"[{ts_str}] build_fixed_map error: {exc}")
             logger.warning("build_fixed_map failed for %s: %s", ts_str, exc)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                summary.messages.append(
+                    f"Stopped early: {consecutive_failures} consecutive failures "
+                    f"(last: [{ts_str}] {exc})."
+                )
+                break
             continue
 
-        cache_hit = "cache" in msg.lower()
+        cache_hit = "cache" in msg.lower() or "loaded from cache" in msg.lower()
         if cache_hit:
             summary.cache_hits += 1
+            consecutive_failures = 0
         if "API" in msg or "grid point" in msg:
-            summary.api_calls_estimated += 1  # rough tally
+            summary.api_calls_estimated += 1
 
         if map_df.empty:
             summary.failures += 1
+            consecutive_failures += 1
             summary.messages.append(f"[{ts_str}] map empty: {msg}")
             logger.warning("Empty map at %s: %s", ts_str, msg)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                summary.messages.append(
+                    f"Stopped early: {consecutive_failures} consecutive empty maps "
+                    f"(last: [{ts_str}])."
+                )
+                break
             continue
 
+        # Success — reset failure counter.
+        consecutive_failures = 0
         summary.map_count += 1
 
         try:
@@ -182,6 +216,9 @@ def run_historical_analysis(
         })
 
         previous_map = map_df
+
+    if progress_callback:
+        progress_callback(total_steps, total_steps, "Complete")
 
     hazards_df = pd.concat(all_hazards, ignore_index=True) if all_hazards else pd.DataFrame()
     alerts_df = pd.concat(all_alerts, ignore_index=True) if all_alerts else pd.DataFrame()
