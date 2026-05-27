@@ -8,7 +8,8 @@ risk advisories** for academic demonstration.
 
 ## Main features
 
-- **All Variables Overview** — auto-discovers every variable from SERENE/AIDA and displays summary statistics, per-variable maps, and normalised time series for all variables simultaneously
+- **All Variables Overview** — auto-discovers every variable from SERENE/AIDA and displays summary statistics, per-variable maps, and normalised time series for
+ all variables simultaneously
 - **Dynamic variable discovery** — variables are detected from the current API DataFrame, SERENE `/api/variables/` endpoint if available, or the fallback default registry. Sample JSON files are legacy references and are not used by the API-only dashboard.
 - **SERENE API integration** — official `POST /api/calc/` with `Authorization: Token <token>`
 - **2.5° fixed grid maps** — configurable resolution with global and regional grids

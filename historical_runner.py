@@ -22,6 +22,7 @@ from alert_engine import generate_alerts_from_hazards
 from config import DEFAULT_REGION, DEFAULT_TIME_STEP_HOURS, HISTORY_DIR, MAP_RESOLUTION_DEFAULT
 from hazard_detector import detect_hazards_from_map
 from map_builder import build_fixed_map
+from map_cache import cache_exists, load_cached_map
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,14 @@ def run_historical_analysis(
     start_dt = _parse_dt(start_time)
     end_dt = _parse_dt(end_time)
 
-    if start_dt >= end_dt:
-        summary.messages.append("start_time must be before end_time.")
+    if start_dt > end_dt:
+        summary.messages.append("start_time must be before or equal to end_time.")
+        return [], pd.DataFrame(), pd.DataFrame(), summary
+
+    if not allow_api and (not use_cache or force_refresh):
+        summary.messages.append(
+            "Cache-only historical replay requires use_cache=True and force_refresh=False."
+        )
         return [], pd.DataFrame(), pd.DataFrame(), summary
 
     timestamps: list[datetime] = []
@@ -133,29 +140,42 @@ def run_historical_analysis(
         if progress_callback:
             progress_callback(idx, total_steps, f"[{idx + 1}/{total_steps}] {ts_str} — {variable}")
 
-        try:
-            map_df, msg = build_fixed_map(
-                model=model,
-                timestamp=ts_str,
-                variable=variable,
-                region=region,
-                resolution=resolution,
-                use_cache=use_cache,
-                force_refresh=force_refresh,
-                allow_api=allow_api,
-            )
-        except Exception as exc:
-            summary.failures += 1
-            consecutive_failures += 1
-            summary.messages.append(f"[{ts_str}] build_fixed_map error: {exc}")
-            logger.warning("build_fixed_map failed for %s: %s", ts_str, exc)
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                summary.messages.append(
-                    f"Stopped early: {consecutive_failures} consecutive failures "
-                    f"(last: [{ts_str}] {exc})."
+        if not allow_api:
+            if not cache_exists(model, variable, ts_str, resolution, region):
+                summary.failures += 1
+                summary.messages.append(f"[{ts_str}] skipped: no cache in cache-only mode")
+                if progress_callback:
+                    progress_callback(idx + 1, total_steps, f"[{idx + 1}/{total_steps}] skipped — {variable}")
+                continue
+
+            map_df = load_cached_map(model, variable, ts_str, resolution, region)
+            msg = f"Loaded from cache ({len(map_df)} rows)."
+        else:
+            try:
+                map_df, msg = build_fixed_map(
+                    model=model,
+                    timestamp=ts_str,
+                    variable=variable,
+                    region=region,
+                    resolution=resolution,
+                    use_cache=use_cache,
+                    force_refresh=force_refresh,
+                    allow_api=allow_api,
                 )
-                break
-            continue
+            except Exception as exc:
+                summary.failures += 1
+                consecutive_failures += 1
+                summary.messages.append(f"[{ts_str}] build_fixed_map error: {exc}")
+                logger.warning("build_fixed_map failed for %s: %s", ts_str, exc)
+                if progress_callback:
+                    progress_callback(idx + 1, total_steps, f"[{idx + 1}/{total_steps}] failed — {variable}")
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    summary.messages.append(
+                        f"Stopped early: {consecutive_failures} consecutive failures "
+                        f"(last: [{ts_str}] {exc})."
+                    )
+                    break
+                continue
 
         cache_hit = "cache" in msg.lower() or "loaded from cache" in msg.lower()
         if cache_hit:
@@ -169,6 +189,8 @@ def run_historical_analysis(
             consecutive_failures += 1
             summary.messages.append(f"[{ts_str}] map empty: {msg}")
             logger.warning("Empty map at %s: %s", ts_str, msg)
+            if progress_callback:
+                progress_callback(idx + 1, total_steps, f"[{idx + 1}/{total_steps}] empty — {variable}")
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 summary.messages.append(
                     f"Stopped early: {consecutive_failures} consecutive empty maps "
@@ -216,6 +238,9 @@ def run_historical_analysis(
         })
 
         previous_map = map_df
+
+        if progress_callback:
+            progress_callback(idx + 1, total_steps, f"[{idx + 1}/{total_steps}] complete — {variable}")
 
     if progress_callback:
         progress_callback(total_steps, total_steps, "Complete")

@@ -23,11 +23,11 @@ from config import (
 )
 from data_loader import LoadStatus, discover_variables, load_data
 from variable_registry import get_available_variables
-from grid_generator import list_regions
+from grid_generator import generate_region_grid, list_regions
 from hazard_detector import detect_hazards_from_map
-from historical_runner import list_historical_runs, load_historical_run, run_historical_analysis, save_historical_run
+from historical_runner import RunSummary, list_historical_runs, load_historical_run, run_historical_analysis, save_historical_run
 from map_builder import build_fixed_map
-from map_cache import count_cached_maps, list_cached_maps
+from map_cache import cache_exists, count_cached_maps, list_cached_maps
 from serene_client import MAX_GRID_POINTS, SereneClient
 from visualisation import (
     create_advisory_card_html,
@@ -59,6 +59,17 @@ reload_config()
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
+
+MAX_HISTORICAL_STEPS = 30
+MAX_HISTORICAL_API_REQUESTS = 300
+MAX_HISTORICAL_CACHE_CHECKS = 300
+NO_HISTORICAL_CACHE_MESSAGE = (
+    "No cached maps found for this historical window.\n\n"
+    "Historical replay is cache-only by default.\n\n"
+    "Run Live Fixed Map first to create matching cache, or enable "
+    "\"Allow live API requests for missing historical cache\".\n\n"
+    "Note: current SERENE /api/calc/ does not provide confirmed retrospective retrieval."
+)
 
 # ── Session state (existing) ─────────────────────────────────────────────────
 if "data" not in st.session_state:
@@ -93,6 +104,14 @@ if "historical_summary" not in st.session_state:
     st.session_state.historical_summary = None
 if "historical_run_id" not in st.session_state:
     st.session_state.historical_run_id = None
+if "historical_running" not in st.session_state:
+    st.session_state.historical_running = False
+if "historical_debug_plan" not in st.session_state:
+    st.session_state.historical_debug_plan = {}
+if "hist_case_study" not in st.session_state:
+    st.session_state.hist_case_study = False
+if "hist_case_study_loaded" not in st.session_state:
+    st.session_state.hist_case_study_loaded = False
 if "available_variables" not in st.session_state:
     st.session_state.available_variables = discover_variables()
 if "available_variable_metadata" not in st.session_state:
@@ -477,7 +496,181 @@ def _build_live_map(params: dict) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _clear_historical_results(summary: RunSummary | None = None) -> None:
+    st.session_state.historical_maps_meta = []
+    st.session_state.historical_hazards = pd.DataFrame()
+    st.session_state.historical_alerts = pd.DataFrame()
+    st.session_state.historical_summary = summary
+    st.session_state.historical_run_id = None
+
+
+def _normalise_historical_variables(params: dict) -> list[str]:
+    variables = params.get("variables")
+    if variables is None:
+        variables = st.session_state.available_variables
+    if isinstance(variables, str):
+        variables = [variables]
+    return [str(v) for v in variables if str(v)]
+
+
+def _apply_historical_case_study_defaults() -> None:
+    variables = st.session_state.available_variables
+    default_variable = "TEC" if "TEC" in variables else (variables[0] if variables else "")
+    st.session_state.hist_show_all = False
+    if default_variable:
+        st.session_state.hist_var = default_variable
+    st.session_state.hist_region = "uk"
+    st.session_state.hist_res = 10.0
+    st.session_state.hist_start = "2024-05-10T00:00:00"
+    st.session_state.hist_end = "2024-05-12T23:00:00"
+    st.session_state.hist_step = 12
+    st.session_state.hist_use_cache = True
+    st.session_state.hist_force = False
+    st.session_state.hist_allow_api = False
+
+
+def _format_history_timestamp(ts: pd.Timestamp) -> str:
+    return pd.Timestamp(ts).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _build_historical_execution_plan(params: dict) -> dict:
+    variables = _normalise_historical_variables(params)
+    use_cache = bool(params.get("use_cache", True))
+    force_refresh = bool(params.get("force_refresh", False))
+    allow_live_api = bool(params.get("allow_live_api", False))
+    time_step_hours = max(1, int(params.get("time_step", DEFAULT_TIME_STEP_HOURS)))
+
+    plan: dict = {
+        "variables": variables,
+        "start_time": params.get("start_time", ""),
+        "end_time": params.get("end_time", ""),
+        "time_step_hours": time_step_hours,
+        "number_of_timestamps": 0,
+        "region": params.get("region", "uk"),
+        "resolution": params.get("resolution", 10.0),
+        "use_cache": use_cache,
+        "force_refresh": force_refresh,
+        "allow_live_api": allow_live_api,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_check_skipped": False,
+        "total_steps": 0,
+        "estimated_grid_points": 0,
+        "estimated_api_requests": 0,
+        "execution_mode": "live API allowed" if allow_live_api else "cache-only replay",
+        "timestamps": [],
+        "cached_keys": [],
+        "missing_keys": [],
+        "error": "",
+    }
+
+    if not variables:
+        plan["error"] = "No variables selected for historical analysis."
+        return plan
+
+    try:
+        start_ts = pd.to_datetime(params["start_time"])
+        end_ts = pd.to_datetime(params["end_time"])
+    except Exception as exc:
+        plan["error"] = f"Invalid historical time window: {exc}"
+        return plan
+
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        plan["error"] = "Invalid historical time window."
+        return plan
+    if start_ts > end_ts:
+        plan["error"] = "Start datetime must be before or equal to end datetime."
+        return plan
+
+    try:
+        span_hours = (end_ts - start_ts).total_seconds() / 3600
+    except Exception as exc:
+        plan["error"] = f"Invalid historical time window: {exc}"
+        return plan
+
+    timestamp_count = int(span_hours // time_step_hours) + 1
+    total_steps = timestamp_count * len(variables)
+    plan["number_of_timestamps"] = timestamp_count
+    plan["total_steps"] = total_steps
+
+    try:
+        grid_df = generate_region_grid(params["region"], resolution=params["resolution"])
+        plan["estimated_grid_points"] = len(grid_df)
+    except Exception as exc:
+        plan["error"] = f"Could not estimate grid points: {exc}"
+        return plan
+
+    plan["estimated_api_requests"] = plan["estimated_grid_points"] * total_steps
+
+    if total_steps > MAX_HISTORICAL_CACHE_CHECKS:
+        plan["cache_check_skipped"] = True
+        return plan
+
+    timestamps = [
+        _format_history_timestamp(ts)
+        for ts in pd.date_range(start_ts, end_ts, freq=f"{time_step_hours}h")
+    ]
+    plan["timestamps"] = timestamps
+
+    for variable in variables:
+        for ts_str in timestamps:
+            key = {
+                "model": params["model"],
+                "variable": variable,
+                "timestamp": ts_str,
+                "resolution": params["resolution"],
+                "region": params["region"],
+            }
+            if cache_exists(params["model"], variable, ts_str, params["resolution"], params["region"]):
+                plan["cached_keys"].append(key)
+            else:
+                plan["missing_keys"].append(key)
+
+    plan["cache_hits"] = len(plan["cached_keys"])
+    plan["cache_misses"] = len(plan["missing_keys"])
+    return plan
+
+
+def _render_historical_debug_plan(params: dict) -> None:
+    plan = _build_historical_execution_plan(params)
+    st.session_state.historical_debug_plan = plan
+
+    with st.expander("Debug / execution plan"):
+        rows = {
+            "variables": ", ".join(plan["variables"]),
+            "start_time": plan["start_time"],
+            "end_time": plan["end_time"],
+            "time_step_hours": plan["time_step_hours"],
+            "number_of_timestamps": plan["number_of_timestamps"],
+            "region": plan["region"],
+            "resolution": plan["resolution"],
+            "use_cache": plan["use_cache"],
+            "force_refresh": plan["force_refresh"],
+            "allow_live_api": plan["allow_live_api"],
+            "cache_hits_found": plan["cache_hits"],
+            "cache_misses": plan["cache_misses"],
+            "total_steps": plan["total_steps"],
+            "estimated_grid_points": plan["estimated_grid_points"],
+            "estimated_api_requests": plan["estimated_api_requests"],
+            "execution_mode": plan["execution_mode"],
+        }
+        if plan["cache_check_skipped"]:
+            rows["cache_check"] = f"skipped above {MAX_HISTORICAL_CACHE_CHECKS} step(s)"
+        if plan["error"]:
+            rows["error"] = plan["error"]
+
+        debug_df = pd.DataFrame(
+            [{"setting": key, "value": str(value)} for key, value in rows.items()]
+        )
+        st.dataframe(debug_df, hide_index=True, use_container_width=True)
+
+
 def _render_historical_sidebar() -> dict:
+    if st.session_state.get("hist_case_study"):
+        _apply_historical_case_study_defaults()
+        st.session_state.hist_case_study = False
+        st.session_state.hist_case_study_loaded = True
+
     st.sidebar.markdown("# 📊 Historical Analysis")
     st.sidebar.markdown("*Time-window hazard survey*")
     st.sidebar.markdown("---")
@@ -588,12 +781,10 @@ def _render_historical_sidebar() -> dict:
     # Case study quick button
     if st.sidebar.button("⚡ Load May 2024 storm case study", use_container_width=True):
         st.session_state.hist_case_study = True
+        st.rerun()
 
     if st.sidebar.button("Run historical analysis", type="primary", use_container_width=True):
         _run_historical(params)
-    elif st.session_state.get("hist_case_study"):
-        _run_historical(params)
-        st.session_state.hist_case_study = False
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
@@ -605,177 +796,183 @@ def _render_historical_sidebar() -> dict:
 
 
 def _run_historical(params: dict) -> None:
-    variables = params.get("variables")
-    if variables is None:
-        variables = st.session_state.available_variables
-    if isinstance(variables, str):
-        variables = [variables]
+    if st.session_state.historical_running:
+        st.warning("Historical analysis is already running.")
+        return
 
-    use_cache = params.get("use_cache", True)
-    force_refresh = params.get("force_refresh", False)
-    allow_live_api = params.get("allow_live_api", False)
+    st.session_state.historical_running = True
+    st.session_state.hist_case_study = False
+    st.session_state.hist_case_study_loaded = False
+    progress_bar = None
 
-    # ── Cache availability pre-check ──────────────────────────────────────
-    from map_cache import cache_exists as _ce
-    timestamps_dt = list(pd.date_range(
-        pd.to_datetime(params["start_time"]),
-        pd.to_datetime(params["end_time"]),
-        freq=f"{params['time_step']}h",
-    ))
+    try:
+        variables = _normalise_historical_variables(params)
+        use_cache = bool(params.get("use_cache", True))
+        force_refresh = bool(params.get("force_refresh", False))
+        allow_live_api = bool(params.get("allow_live_api", False))
+        plan = _build_historical_execution_plan(params)
+        st.session_state.historical_debug_plan = plan
 
-    if not force_refresh and use_cache and not allow_live_api:
-        cached_count = 0
-        total_checks = len(timestamps_dt) * len(variables)
-        for var in variables:
-            for ts_dt in timestamps_dt:
-                ts_str = ts_dt.strftime("%Y-%m-%dT%H:%M:%S")
-                if _ce(params["model"], var, ts_str, params["resolution"], params["region"]):
-                    cached_count += 1
-
-        if cached_count == 0:
-            st.error(
-                "**No cached maps found for the selected historical window.** "
-                "Historical replay requires precomputed cache. "
-                "Enable **Allow live API requests for missing historical cache** "
-                "in the sidebar to call SERENE API for missing timestamps.\n\n"
-                "Note: the current SERENE /api/calc/ endpoint does not accept "
-                "historical time parameters — API results will be current data, "
-                "not confirmed retrospective data."
-            )
-            st.session_state.historical_maps_meta = []
-            st.session_state.historical_hazards = pd.DataFrame()
-            st.session_state.historical_alerts = pd.DataFrame()
-            st.session_state.historical_summary = None
+        if plan["error"]:
+            st.error(plan["error"])
+            _clear_historical_results()
             return
-        elif cached_count < total_checks:
-            st.info(
-                f"**{cached_count}/{total_checks} timestamp(s) have cache.** "
-                f"{total_checks - cached_count} timestamp(s) will be skipped. "
-                "Enable live API to attempt SERENE requests for missing timestamps."
-            )
 
-    # ── Token check for API mode ──────────────────────────────────────────
-    if allow_live_api and not SERENE_API_TOKEN:
-        st.error(
-            "**SERENE API token is not configured.** "
-            "Cannot make live API requests without a token. "
-            "Disable live API to use cache-only mode."
+        total_steps = int(plan["total_steps"])
+        if total_steps <= 0:
+            st.error("No historical timestamps selected.")
+            _clear_historical_results()
+            return
+
+        if not allow_live_api:
+            if not use_cache or force_refresh:
+                st.error(
+                    "Cache-only historical replay requires Use cache = True and Force refresh = False.\n\n"
+                    "Enable live API requests if you intentionally want to call SERENE API."
+                )
+                _clear_historical_results()
+                return
+
+            if total_steps > MAX_HISTORICAL_STEPS:
+                st.error(
+                    f"Historical cache-only replay is limited to {MAX_HISTORICAL_STEPS} step(s). "
+                    f"This run has {total_steps} step(s). Shorten the time range, select fewer "
+                    "variables, or increase the time step."
+                )
+                _clear_historical_results()
+                return
+
+            if plan["cache_hits"] == 0:
+                st.error(NO_HISTORICAL_CACHE_MESSAGE)
+                _clear_historical_results()
+                return
+
+            if plan["cache_misses"] > 0:
+                st.info(
+                    f"{plan['cache_hits']}/{total_steps} historical step(s) have cache. "
+                    f"{plan['cache_misses']} missing step(s) will be skipped without API calls."
+                )
+
+        if allow_live_api:
+            if not SERENE_API_TOKEN:
+                st.error(
+                    "**SERENE API token is not configured.** "
+                    "Cannot make live API requests without a token. "
+                    "Disable live API to use cache-only mode."
+                )
+                _clear_historical_results()
+                return
+
+            if plan["estimated_api_requests"] > MAX_HISTORICAL_API_REQUESTS:
+                st.error(
+                    f"Estimated API requests = {plan['estimated_api_requests']}. "
+                    f"Historical live API mode is limited to {MAX_HISTORICAL_API_REQUESTS} "
+                    "point request(s). Use cached maps, a larger time step, smaller region, "
+                    "or coarser resolution."
+                )
+                _clear_historical_results()
+                return
+
+        progress_bar = st.progress(
+            0.0,
+            text=f"Starting historical analysis ({total_steps} step(s))...",
         )
-        st.session_state.historical_maps_meta = []
-        st.session_state.historical_hazards = pd.DataFrame()
-        st.session_state.historical_alerts = pd.DataFrame()
-        st.session_state.historical_summary = None
-        return
 
-    # ── Request estimation for API mode ───────────────────────────────────
-    from grid_generator import generate_region_grid
-    grid_df = generate_region_grid(params["region"], resolution=params["resolution"])
-    est_points = len(grid_df)
-    time_steps = len(timestamps_dt)
-    estimated_requests = est_points * time_steps * len(variables)
+        all_hazards: list[pd.DataFrame] = []
+        all_alerts: list[pd.DataFrame] = []
+        all_maps_meta: list[dict] = []
+        total_maps = 0
+        total_cache = 0
+        total_fail = 0
+        total_api = 0
+        all_messages: list[str] = []
+        time_steps = max(1, int(plan["number_of_timestamps"]))
 
-    if allow_live_api and estimated_requests > 1000:
-        st.error(
-            f"**Estimated API requests = {estimated_requests}.** "
-            "Historical analysis is too large for point-based API. "
-            "Use cached maps, larger time step, smaller region, or coarser resolution."
-        )
-        st.session_state.historical_maps_meta = []
-        st.session_state.historical_hazards = pd.DataFrame()
-        st.session_state.historical_alerts = pd.DataFrame()
-        st.session_state.historical_summary = None
-        return
+        for var_index, var in enumerate(variables):
+            offset = var_index * time_steps
 
-    # ── Run with progress bar ─────────────────────────────────────────────
-    total_steps = time_steps * len(variables)
-    progress_bar = st.progress(0.0, text=f"Starting historical analysis ({total_steps} step(s))…")
-    progress_state: dict[str, int] = {"done": 0}
+            def _on_step(done: int, total: int, status: str, offset: int = offset) -> None:
+                overall_done = min(offset + done, total_steps)
+                progress_bar.progress(
+                    overall_done / max(total_steps, 1),
+                    text=f"{status} ({overall_done}/{total_steps})",
+                )
 
-    def _on_step(done: int, total: int, status: str) -> None:
-        progress_state["done"] = done
-        progress_bar.progress(
-            done / max(total, 1),
-            text=f"{status} ({done}/{total})",
-        )
+            try:
+                maps_meta, hazards_df, alerts_df, var_summary = run_historical_analysis(
+                    model=params["model"],
+                    variable=var,
+                    start_time=params["start_time"],
+                    end_time=params["end_time"],
+                    time_step_hours=params["time_step"],
+                    region=params["region"],
+                    resolution=params["resolution"],
+                    use_cache=use_cache,
+                    force_refresh=force_refresh,
+                    allow_api=allow_live_api,
+                    progress_callback=_on_step,
+                )
+            except Exception as exc:
+                message = f"Historical analysis failed for {var}: {exc}"
+                st.error(message)
+                total_fail += 1
+                all_messages.append(message)
+                continue
 
-    all_hazards: list[pd.DataFrame] = []
-    all_alerts: list[pd.DataFrame] = []
-    all_maps_meta: list[dict] = []
-    total_maps = 0
-    total_cache = 0
-    total_fail = 0
-    all_messages: list[str] = []
-
-    for var in variables:
-        try:
-            maps_meta, hazards_df, alerts_df, summary = run_historical_analysis(
-                model=params["model"],
-                variable=var,
-                start_time=params["start_time"],
-                end_time=params["end_time"],
-                time_step_hours=params["time_step"],
-                region=params["region"],
-                resolution=params["resolution"],
-                use_cache=params["use_cache"],
-                force_refresh=params["force_refresh"],
-                allow_api=allow_live_api,
-                progress_callback=_on_step,
-            )
-        except Exception as exc:
-            st.error(f"Historical analysis failed for {var}: {exc}")
-            continue
-
-        if summary is not None:
             all_hazards.append(hazards_df)
             all_alerts.append(alerts_df)
             all_maps_meta.extend(maps_meta)
-            total_maps += summary.map_count
-            total_cache += summary.cache_hits
-            total_fail += summary.failures
-            all_messages.extend(summary.messages)
+            total_maps += var_summary.map_count
+            total_cache += var_summary.cache_hits
+            total_fail += var_summary.failures
+            total_api += var_summary.api_calls_estimated
+            all_messages.extend(var_summary.messages)
 
-    progress_bar.progress(1.0, text="Complete")
-    progress_bar.empty()
+        progress_bar.progress(1.0, text="Complete")
 
-    if all_hazards:
-        hazards_df = pd.concat(all_hazards, ignore_index=True)
-        alerts_df = pd.concat(all_alerts, ignore_index=True)
-        from historical_runner import RunSummary
+        hazards_df = pd.concat(all_hazards, ignore_index=True) if all_hazards else pd.DataFrame()
+        alerts_df = pd.concat(all_alerts, ignore_index=True) if all_alerts else pd.DataFrame()
         summary = RunSummary(
+            start_time=params["start_time"],
+            end_time=params["end_time"],
+            time_step_hours=params["time_step"],
             map_count=total_maps,
             alert_count=len(alerts_df),
             cache_hits=total_cache,
+            api_calls_estimated=total_api,
             failures=total_fail,
             messages=all_messages,
-            time_step_hours=params["time_step"],
         )
-    else:
-        hazards_df = pd.DataFrame()
-        alerts_df = pd.DataFrame()
-        summary = None
-        all_maps_meta = []
 
-    st.session_state.historical_maps_meta = all_maps_meta
-    st.session_state.historical_hazards = hazards_df
-    st.session_state.historical_alerts = alerts_df
-    st.session_state.historical_summary = summary
+        st.session_state.historical_maps_meta = all_maps_meta
+        st.session_state.historical_hazards = hazards_df
+        st.session_state.historical_alerts = alerts_df
+        st.session_state.historical_summary = summary
 
-    # Persist to disk so results survive page refresh / restart.
-    if summary is not None and summary.map_count > 0:
-        try:
-            run_id = save_historical_run(
-                hazards_df=hazards_df,
-                alerts_df=alerts_df,
-                summary=summary,
-                model=params["model"],
-                variable=variables[0] if len(variables) == 1 else ", ".join(variables),
-                region=params["region"],
-            )
-            if run_id:
-                st.session_state.historical_run_id = run_id
-                st.sidebar.success(f"Saved: {run_id}")
-        except Exception as exc:
-            st.sidebar.warning(f"Could not save results: {exc}")
+        # Persist to disk so results survive page refresh / restart.
+        if summary.map_count > 0:
+            try:
+                run_id = save_historical_run(
+                    hazards_df=hazards_df,
+                    alerts_df=alerts_df,
+                    summary=summary,
+                    model=params["model"],
+                    variable=variables[0] if len(variables) == 1 else ", ".join(variables),
+                    region=params["region"],
+                )
+                if run_id:
+                    st.session_state.historical_run_id = run_id
+                    st.sidebar.success(f"Saved: {run_id}")
+            except Exception as exc:
+                st.sidebar.warning(f"Could not save results: {exc}")
+    except Exception as exc:
+        st.error(f"Historical analysis failed: {exc}")
+        _clear_historical_results()
+    finally:
+        if progress_bar is not None:
+            progress_bar.empty()
+        st.session_state.hist_case_study = False
+        st.session_state.historical_running = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1284,6 +1481,7 @@ def _render_historical_main(params: dict) -> None:
     )
 
     _render_cloud_api_hint()
+    _render_historical_debug_plan(params)
 
     # Show loaded run info
     if st.session_state.get("historical_run_id"):
@@ -1293,9 +1491,11 @@ def _render_historical_main(params: dict) -> None:
     if st.session_state.get("hist_case_study"):
         st.info(
             "**May 2024 storm case study loaded.** "
-            "2024-05-10 00:00 → 2024-05-12 23:00 UTC, TEC, 1h steps. "
+            "2024-05-10 00:00 -> 2024-05-12 23:00 UTC, TEC, 12h steps. "
             "Click **Run historical analysis** to start."
         )
+    elif st.session_state.get("hist_case_study_loaded"):
+        st.info("Case study dates loaded. Click Run historical analysis.")
 
     summary = st.session_state.historical_summary
 
@@ -1325,6 +1525,17 @@ def _render_historical_main(params: dict) -> None:
         with st.expander(f"Details ({len(summary.messages)} message(s))"):
             for m in summary.messages:
                 st.caption(m)
+
+    if summary.map_count == 0:
+        st.warning(
+            "No historical maps were loaded.\n\n"
+            "Possible reasons:\n"
+            "1. No matching cache files exist.\n"
+            "2. Live API requests are disabled.\n"
+            "3. Current SERENE /api/calc/ does not support confirmed historical retrieval.\n"
+            "4. Timestamp / region / resolution / variable do not match existing cache keys."
+        )
+        return
 
     st.markdown("---")
 
