@@ -9,7 +9,7 @@ Run::
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +29,14 @@ from historical_runner import RunSummary, list_historical_runs, load_historical_
 from map_builder import build_fixed_map
 from map_cache import cache_exists, count_cached_maps, list_cached_maps
 from serene_client import MAX_GRID_POINTS, SereneClient
+from serene_indices import (
+    SERENE_KP_AP_URL,
+    build_indices_alerts,
+    daily_peak_risk,
+    filter_indices_by_time,
+    load_kp_ap_indices,
+    risk_counts,
+)
 from visualisation import (
     create_advisory_card_html,
     create_alert_summary,
@@ -118,6 +126,16 @@ if "available_variable_metadata" not in st.session_state:
     st.session_state.available_variable_metadata = {}
 if "show_all_variables" not in st.session_state:
     st.session_state.show_all_variables = True
+if "indices_df" not in st.session_state:
+    st.session_state.indices_df = pd.DataFrame()
+if "indices_alerts" not in st.session_state:
+    st.session_state.indices_alerts = pd.DataFrame()
+if "indices_daily" not in st.session_state:
+    st.session_state.indices_daily = pd.DataFrame()
+if "indices_counts" not in st.session_state:
+    st.session_state.indices_counts = pd.DataFrame()
+if "indices_status" not in st.session_state:
+    st.session_state.indices_status = ""
 
 # No local bootstrap — this project uses SERENE API only.
 if "bootstrap_done" not in st.session_state:
@@ -157,6 +175,153 @@ def _run_api_connection_test() -> None:
     else:
         st.sidebar.warning(msg)
 
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_indices_cached() -> tuple[pd.DataFrame, bool, str]:
+    """Download SERENE Kp/ap indices once per cache TTL."""
+    df, status = load_kp_ap_indices()
+    return df, status.ok, status.message
+
+
+def _combine_utc(date_value: object, time_value: object) -> str:
+    """Combine Streamlit date/time values into an ISO UTC timestamp."""
+    return datetime.combine(date_value, time_value, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _min_kp_from_label(label: str) -> float:
+    return {
+        "G1+ / Kp >= 5": 5.0,
+        "G2+ / Kp >= 6": 6.0,
+        "G3+ / Kp >= 7": 7.0,
+        "G4+ / Kp >= 8": 8.0,
+        "G5 only / Kp = 9": 9.0,
+    }.get(label, 5.0)
+
+
+def _run_indices_analysis(params: dict) -> None:
+    progress_bar = st.progress(0.0, text="Downloading SERENE Kp/ap indices...")
+    try:
+        indices_df, ok, message = _load_indices_cached()
+        progress_bar.progress(0.45, text="Filtering time range...")
+        if not ok or indices_df.empty:
+            st.error(message or "Could not load SERENE indices.")
+            st.session_state.indices_df = pd.DataFrame()
+            st.session_state.indices_alerts = pd.DataFrame()
+            st.session_state.indices_daily = pd.DataFrame()
+            st.session_state.indices_counts = pd.DataFrame()
+            st.session_state.indices_status = message
+            return
+
+        filtered = filter_indices_by_time(
+            indices_df,
+            params["start_time"],
+            params["end_time"],
+        )
+        alerts = build_indices_alerts(filtered, minimum_kp=params["minimum_kp"])
+        daily = daily_peak_risk(filtered)
+        counts = risk_counts(filtered)
+
+        st.session_state.indices_df = filtered
+        st.session_state.indices_alerts = alerts
+        st.session_state.indices_daily = daily
+        st.session_state.indices_counts = counts
+        st.session_state.indices_status = (
+            f"{message} Filtered to {len(filtered):,} interval(s) from "
+            f"{params['start_time']} to {params['end_time']} UTC."
+        )
+        progress_bar.progress(1.0, text="Complete")
+    except Exception as exc:
+        st.error(f"SERENE indices analysis failed: {exc}")
+        st.session_state.indices_df = pd.DataFrame()
+        st.session_state.indices_alerts = pd.DataFrame()
+        st.session_state.indices_daily = pd.DataFrame()
+        st.session_state.indices_counts = pd.DataFrame()
+        st.session_state.indices_status = str(exc)
+    finally:
+        progress_bar.empty()
+
+
+def _create_indices_kp_timeline(df: pd.DataFrame):
+    if df.empty:
+        return _empty_plot("No SERENE Kp/ap intervals in this time range.")
+    import plotly.graph_objects as go
+
+    risk_colors = {
+        "Normal": "#2e7d32",
+        "Watch": "#f9a825",
+        "Warning": "#ef6c00",
+        "Severe": "#c62828",
+    }
+    marker_colors = [risk_colors.get(str(v), "#607d8b") for v in df["risk_level"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["time"],
+        y=df["Kp"],
+        mode="lines+markers",
+        name="Kp",
+        line=dict(color="#263238", width=2),
+        marker=dict(size=8, color=marker_colors),
+        customdata=df[["ap", "g_scale", "risk_level"]],
+        hovertemplate=(
+            "%{x}<br>Kp=%{y:.1f}<br>ap=%{customdata[0]}<br>"
+            "%{customdata[1]} / %{customdata[2]}<extra></extra>"
+        ),
+    ))
+    for y, label, color in [
+        (5, "G1", "#fdd835"),
+        (6, "G2", "#f9a825"),
+        (7, "G3", "#ef6c00"),
+        (8, "G4", "#d84315"),
+        (9, "G5", "#b71c1c"),
+    ]:
+        fig.add_hline(
+            y=y,
+            line_dash="dot",
+            line_color=color,
+            annotation_text=label,
+            annotation_position="top right",
+        )
+    fig.update_layout(
+        title="SERENE Kp/ap geomagnetic risk timeline",
+        xaxis_title="UTC time",
+        yaxis_title="Kp index",
+        yaxis=dict(range=[0, 9.5]),
+        template="plotly_white",
+        height=460,
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _create_indices_daily_peak_chart(daily_df: pd.DataFrame):
+    if daily_df.empty:
+        return _empty_plot("No daily peak risk data in this time range.")
+    import plotly.express as px
+
+    color_map = {
+        "Normal": "#2e7d32",
+        "Watch": "#f9a825",
+        "Warning": "#ef6c00",
+        "Severe": "#c62828",
+    }
+    fig = px.bar(
+        daily_df,
+        x="date",
+        y="max_Kp",
+        color="peak_risk_level",
+        color_discrete_map=color_map,
+        hover_data=["max_ap", "peak_g_scale", "storm_intervals_Kp_ge_5"],
+        labels={
+            "date": "Date",
+            "max_Kp": "Daily peak Kp",
+            "peak_risk_level": "Risk level",
+        },
+        title="Daily peak geomagnetic risk",
+    )
+    fig.update_layout(template="plotly_white", height=420)
+    return fig
 
 
 def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> None:
@@ -201,6 +366,72 @@ def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> 
 
     styled = summary_df.style.map(_risk_color, subset=["Risk"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sidebar — SERENE indices risk mode
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _render_indices_sidebar() -> dict:
+    st.sidebar.markdown("# 📈 SERENE Indices Risk")
+    st.sidebar.markdown("*Historical Kp/ap risk analysis*")
+    st.sidebar.markdown("---")
+
+    params: dict = {"mode": "indices"}
+
+    st.sidebar.caption("Source: SERENE Kp/ap CSV download")
+    st.sidebar.code(SERENE_KP_AP_URL, language="text")
+
+    st.sidebar.markdown("#### Time range")
+    start_date = st.sidebar.date_input(
+        "Start date",
+        value=datetime(2024, 5, 10, tzinfo=timezone.utc).date(),
+        key="indices_start_date",
+    )
+    start_clock = st.sidebar.time_input(
+        "Start time (UTC)",
+        value=time(0, 0),
+        key="indices_start_time",
+    )
+    end_date = st.sidebar.date_input(
+        "End date",
+        value=datetime(2024, 5, 12, tzinfo=timezone.utc).date(),
+        key="indices_end_date",
+    )
+    end_clock = st.sidebar.time_input(
+        "End time (UTC)",
+        value=time(23, 59),
+        key="indices_end_time",
+    )
+    params["start_time"] = _combine_utc(start_date, start_clock)
+    params["end_time"] = _combine_utc(end_date, end_clock)
+
+    threshold_label = st.sidebar.selectbox(
+        "Risk events table threshold",
+        ["G1+ / Kp >= 5", "G2+ / Kp >= 6", "G3+ / Kp >= 7", "G4+ / Kp >= 8", "G5 only / Kp = 9"],
+        index=2,
+        key="indices_threshold",
+        help="Timeline always shows all Kp intervals; event tables can focus on stronger storms.",
+    )
+    params["minimum_kp"] = _min_kp_from_label(threshold_label)
+
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Load SERENE indices risk", type="primary", use_container_width=True):
+        _run_indices_analysis(params)
+
+    if st.sidebar.button("Clear indices results", use_container_width=True):
+        st.session_state.indices_df = pd.DataFrame()
+        st.session_state.indices_alerts = pd.DataFrame()
+        st.session_state.indices_daily = pd.DataFrame()
+        st.session_state.indices_counts = pd.DataFrame()
+        st.session_state.indices_status = ""
+
+    st.sidebar.caption(
+        "This mode analyses historical geomagnetic Kp/ap indices. It is separate "
+        "from SERENE /api/calc/, which is a current point calculation endpoint."
+    )
+    return params
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -991,6 +1222,131 @@ def _render_shared_status() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Main page — SERENE indices risk mode
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _render_indices_main(params: dict) -> None:
+    st.title("SERENE Historical Indices Risk Analysis")
+    st.caption(
+        "Adjustable historical risk analysis from SERENE Kp/ap geomagnetic indices. "
+        "This complements the live /api/calc/ map pipeline; it is not retrospective AIDA map retrieval."
+    )
+
+    st.info(
+        "Set the UTC time range in the sidebar, then click **Load SERENE indices risk**. "
+        "Default dates cover the May 2024 geomagnetic storm so the risk timeline has visible events."
+    )
+
+    indices_df = st.session_state.indices_df
+    alerts_df = st.session_state.indices_alerts
+    daily_df = st.session_state.indices_daily
+    counts_df = st.session_state.indices_counts
+
+    if st.session_state.indices_status:
+        st.caption(st.session_state.indices_status)
+
+    if indices_df.empty:
+        st.warning("No SERENE indices loaded for the selected time range yet.")
+        return
+
+    peak_row = indices_df.loc[indices_df["Kp"].idxmax()]
+    storm_count = int((indices_df["Kp"] >= 5.0).sum())
+    severe_count = int((indices_df["Kp"] >= 8.0).sum())
+    overall, overall_msg = generate_overall_risk(alerts_df)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Intervals", f"{len(indices_df):,}")
+    with c2:
+        st.metric("Peak Kp", f"{float(peak_row['Kp']):.1f}", str(peak_row["g_scale"]))
+    with c3:
+        st.metric("Storm intervals Kp>=5", storm_count)
+    with c4:
+        st.metric("Severe intervals Kp>=8", severe_count)
+
+    st.markdown(f"**Prototype overall risk from selected event threshold:** {overall}")
+    st.caption(overall_msg)
+
+    tab_timeline, tab_events, tab_daily, tab_counts, tab_impact, tab_raw = st.tabs(
+        ["Risk timeline", "Risk intervals", "Daily peaks", "Counts", "Aviation impact", "Raw data"]
+    )
+
+    with tab_timeline:
+        st.plotly_chart(
+            _create_indices_kp_timeline(indices_df),
+            use_container_width=True,
+            key="indices_kp_timeline",
+        )
+
+    with tab_events:
+        st.subheader("Risk intervals")
+        if alerts_df.empty:
+            st.info(
+                f"No intervals at or above Kp {params.get('minimum_kp', 5.0):.0f} "
+                "inside this time range."
+            )
+        else:
+            show_cols = [
+                "timestamp",
+                "g_scale",
+                "risk_level",
+                "value",
+                "ap",
+                "possible_aviation_impact",
+                "interpretation",
+            ]
+            st.dataframe(
+                alerts_df[[c for c in show_cols if c in alerts_df.columns]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(f"{len(alerts_df):,} interval(s) matched the selected threshold.")
+
+    with tab_daily:
+        st.plotly_chart(
+            _create_indices_daily_peak_chart(daily_df),
+            use_container_width=True,
+            key="indices_daily_peak",
+        )
+        if not daily_df.empty:
+            st.dataframe(
+                daily_df.sort_values(["max_Kp", "max_ap"], ascending=[False, False]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tab_counts:
+        st.subheader("Risk counts in selected window")
+        if counts_df.empty:
+            st.info("No counts available.")
+        else:
+            st.dataframe(counts_df, use_container_width=True, hide_index=True)
+
+    with tab_impact:
+        st.subheader("Aviation risk interpretation")
+        if alerts_df.empty:
+            st.info("No storm-level intervals selected, so no event impact rows are available.")
+        else:
+            impact_df = (
+                alerts_df[[
+                    "g_scale",
+                    "risk_level",
+                    "possible_aviation_impact",
+                    "interpretation",
+                ]]
+                .drop_duplicates()
+                .sort_values("g_scale", ascending=False)
+            )
+            st.dataframe(impact_df, use_container_width=True, hide_index=True)
+        st.caption(DISCLAIMER)
+
+    with tab_raw:
+        st.caption(f"{len(indices_df):,} raw SERENE Kp/ap interval(s) in selected range.")
+        st.dataframe(indices_df, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main page — Existing dashboard
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1648,7 +2004,7 @@ def _empty_plot(message: str) -> object:
 def _render_sidebar() -> dict:
     mode = st.sidebar.selectbox(
         "Mode",
-        ["Existing dashboard", "Live fixed map", "Historical analysis"],
+        ["Existing dashboard", "Live fixed map", "Historical analysis", "SERENE indices risk"],
         help="Switch between operational modes.",
     )
 
@@ -1656,6 +2012,8 @@ def _render_sidebar() -> dict:
         return _render_existing_sidebar()
     elif mode == "Live fixed map":
         return _render_live_sidebar()
+    elif mode == "SERENE indices risk":
+        return _render_indices_sidebar()
     else:
         return _render_historical_sidebar()
 
@@ -1666,6 +2024,8 @@ def _render_main(params: dict) -> None:
         _render_existing_main(params)
     elif mode == "live":
         _render_live_main(params)
+    elif mode == "indices":
+        _render_indices_main(params)
     else:
         _render_historical_main(params)
 
