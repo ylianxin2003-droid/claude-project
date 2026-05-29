@@ -47,9 +47,18 @@ class RunSummary:
 def _parse_dt(ts: str) -> datetime:
     """Parse an ISO timestamp into a timezone-aware datetime."""
     try:
-        return pd.to_datetime(ts).tz_localize("UTC") if pd.to_datetime(ts).tz is None else pd.to_datetime(ts)
-    except Exception:
-        return datetime.now(timezone.utc)
+        parsed = pd.to_datetime(ts, errors="raise")
+    except Exception as exc:
+        raise ValueError(f"Invalid timestamp: {ts!r}") from exc
+
+    if pd.isna(parsed):
+        raise ValueError(f"Invalid timestamp: {ts!r}")
+
+    if parsed.tzinfo is None:
+        parsed = parsed.tz_localize("UTC")
+    else:
+        parsed = parsed.tz_convert("UTC")
+    return parsed.to_pydatetime()
 
 
 def run_historical_analysis(
@@ -107,8 +116,12 @@ def run_historical_analysis(
         time_step_hours=time_step_hours,
     )
 
-    start_dt = _parse_dt(start_time)
-    end_dt = _parse_dt(end_time)
+    try:
+        start_dt = _parse_dt(start_time)
+        end_dt = _parse_dt(end_time)
+    except ValueError as exc:
+        summary.messages.append(f"Invalid historical time window: {exc}")
+        return [], pd.DataFrame(), pd.DataFrame(), summary
 
     if start_dt > end_dt:
         summary.messages.append("start_time must be before or equal to end_time.")

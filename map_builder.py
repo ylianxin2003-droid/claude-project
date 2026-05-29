@@ -11,7 +11,8 @@ import logging
 
 import pandas as pd
 
-from config import DEFAULT_REGION, MAP_RESOLUTION_DEFAULT, SERENE_API_TOKEN
+import config
+from config import DEFAULT_REGION, MAP_RESOLUTION_DEFAULT
 from grid_generator import generate_region_grid
 from map_cache import cache_exists, load_cached_map, save_cached_map
 from serene_client import SereneClient
@@ -80,7 +81,7 @@ def build_fixed_map(
         )
 
     # ── 1b. Token check ───────────────────────────────────────────────────
-    if not SERENE_API_TOKEN:
+    if not config.SERENE_API_TOKEN:
         return pd.DataFrame(), (
             "SERENE API token is not configured. "
             "Fixed map requires API access or existing cache."

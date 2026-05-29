@@ -1,4 +1,4 @@
-"""
+﻿"""
 Aviation Space Weather Monitoring & ICAO-style Risk Alert Dashboard.
 
 Run::
@@ -15,9 +15,9 @@ import pandas as pd
 import streamlit as st
 
 from alert_engine import DISCLAIMER, generate_alerts, generate_alerts_from_hazards, generate_overall_risk
+import config
 from config import (
     DEFAULT_TIME_STEP_HOURS,
-    SERENE_API_TOKEN,
     reload_config,
     validate_config,
 )
@@ -148,7 +148,7 @@ if "bootstrap_done" not in st.session_state:
 
 
 def _render_cloud_api_hint() -> None:
-    if SERENE_API_TOKEN:
+    if config.SERENE_API_TOKEN:
         return
     st.warning(
         "**SERENE API token is not configured.** "
@@ -365,7 +365,7 @@ def _render_variable_summary_table(df: pd.DataFrame, var_options: list[str]) -> 
         return f"background-color: {colors.get(str(val), 'transparent')}; color: white; font-weight: bold"
 
     styled = summary_df.style.map(_risk_color, subset=["Risk"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -417,10 +417,10 @@ def _render_indices_sidebar() -> dict:
     params["minimum_kp"] = _min_kp_from_label(threshold_label)
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Load SERENE indices risk", type="primary", use_container_width=True):
+    if st.sidebar.button("Load SERENE indices risk", type="primary", width="stretch"):
         _run_indices_analysis(params)
 
-    if st.sidebar.button("Clear indices results", use_container_width=True):
+    if st.sidebar.button("Clear indices results", width="stretch"):
         st.session_state.indices_df = pd.DataFrame()
         st.session_state.indices_alerts = pd.DataFrame()
         st.session_state.indices_daily = pd.DataFrame()
@@ -509,11 +509,11 @@ def _render_existing_sidebar() -> dict:
     }
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Test SERENE API connection", use_container_width=True):
+    if st.sidebar.button("Test SERENE API connection", width="stretch"):
         _run_api_connection_test()
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Load / Refresh data", type="primary", use_container_width=True):
+    if st.sidebar.button("Load / Refresh data", type="primary", width="stretch"):
         _do_load(params)
 
     st.sidebar.caption(
@@ -616,10 +616,10 @@ def _render_live_sidebar() -> dict:
     params["force_refresh"] = st.sidebar.checkbox("Force refresh", value=False, key="live_force")
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Test SERENE API connection", use_container_width=True, key="live_test_api"):
+    if st.sidebar.button("Test SERENE API connection", width="stretch", key="live_test_api"):
         _run_api_connection_test()
 
-    if st.sidebar.button("Build fixed map", type="primary", use_container_width=True):
+    if st.sidebar.button("Build fixed map", type="primary", width="stretch"):
         _build_live_map(params)
 
     st.sidebar.markdown("---")
@@ -893,7 +893,7 @@ def _render_historical_debug_plan(params: dict) -> None:
         debug_df = pd.DataFrame(
             [{"setting": key, "value": str(value)} for key, value in rows.items()]
         )
-        st.dataframe(debug_df, hide_index=True, use_container_width=True)
+        st.dataframe(debug_df, hide_index=True, width="stretch")
 
 
 def _render_historical_sidebar() -> dict:
@@ -996,7 +996,7 @@ def _render_historical_sidebar() -> dict:
             key="hist_load_select",
             help="Select a previously saved run to view results without re-running.",
         )
-        if st.sidebar.button("Load selected run", use_container_width=True):
+        if st.sidebar.button("Load selected run", width="stretch"):
             if selected != "(none)":
                 run_id = saved_runs[run_options.index(selected) - 1]["run_id"]
                 h_df, a_df, r_sum = load_historical_run(run_id)
@@ -1010,11 +1010,11 @@ def _render_historical_sidebar() -> dict:
     st.sidebar.markdown("---")
 
     # Case study quick button
-    if st.sidebar.button("⚡ Load May 2024 storm case study", use_container_width=True):
+    if st.sidebar.button("⚡ Load May 2024 storm case study", width="stretch"):
         st.session_state.hist_case_study = True
         st.rerun()
 
-    if st.sidebar.button("Run historical analysis", type="primary", use_container_width=True):
+    if st.sidebar.button("Run historical analysis", type="primary", width="stretch"):
         _run_historical(params)
 
     st.sidebar.markdown("---")
@@ -1085,7 +1085,7 @@ def _run_historical(params: dict) -> None:
                 )
 
         if allow_live_api:
-            if not SERENE_API_TOKEN:
+            if not config.SERENE_API_TOKEN:
                 st.error(
                     "**SERENE API token is not configured.** "
                     "Cannot make live API requests without a token. "
@@ -1234,7 +1234,7 @@ def _render_indices_main(params: dict) -> None:
     )
 
     st.info(
-        "Set the UTC time range in the sidebar, then click **Load SERENE indices risk**. "
+        "Set the UTC time range in the controls, then click **Load SERENE indices risk**. "
         "Default dates cover the May 2024 geomagnetic storm so the risk timeline has visible events."
     )
 
@@ -1275,7 +1275,7 @@ def _render_indices_main(params: dict) -> None:
     with tab_timeline:
         st.plotly_chart(
             _create_indices_kp_timeline(indices_df),
-            use_container_width=True,
+            width="stretch",
             key="indices_kp_timeline",
         )
 
@@ -1298,7 +1298,7 @@ def _render_indices_main(params: dict) -> None:
             ]
             st.dataframe(
                 alerts_df[[c for c in show_cols if c in alerts_df.columns]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             st.caption(f"{len(alerts_df):,} interval(s) matched the selected threshold.")
@@ -1306,13 +1306,13 @@ def _render_indices_main(params: dict) -> None:
     with tab_daily:
         st.plotly_chart(
             _create_indices_daily_peak_chart(daily_df),
-            use_container_width=True,
+            width="stretch",
             key="indices_daily_peak",
         )
         if not daily_df.empty:
             st.dataframe(
                 daily_df.sort_values(["max_Kp", "max_ap"], ascending=[False, False]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1321,7 +1321,7 @@ def _render_indices_main(params: dict) -> None:
         if counts_df.empty:
             st.info("No counts available.")
         else:
-            st.dataframe(counts_df, use_container_width=True, hide_index=True)
+            st.dataframe(counts_df, width="stretch", hide_index=True)
 
     with tab_impact:
         st.subheader("Aviation risk interpretation")
@@ -1338,12 +1338,12 @@ def _render_indices_main(params: dict) -> None:
                 .drop_duplicates()
                 .sort_values("g_scale", ascending=False)
             )
-            st.dataframe(impact_df, use_container_width=True, hide_index=True)
+            st.dataframe(impact_df, width="stretch", hide_index=True)
         st.caption(DISCLAIMER)
 
     with tab_raw:
         st.caption(f"{len(indices_df):,} raw SERENE Kp/ap interval(s) in selected range.")
-        st.dataframe(indices_df, use_container_width=True, hide_index=True)
+        st.dataframe(indices_df, width="stretch", hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1391,7 +1391,7 @@ def _render_existing_main(params: dict) -> None:
     st.markdown("---")
 
     if st.session_state.data.empty:
-        if not SERENE_API_TOKEN:
+        if not config.SERENE_API_TOKEN:
             st.error(
                 "**SERENE API token is not configured.** "
                 "This dashboard requires SERENE API access or existing cache."
@@ -1436,13 +1436,13 @@ def _render_existing_main(params: dict) -> None:
             with st.expander("Alert details", expanded=False):
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    st.plotly_chart(create_alert_summary(alerts), use_container_width=True, key="alert_summary_chart")
+                    st.plotly_chart(create_alert_summary(alerts), width="stretch", key="alert_summary_chart")
                 with col_b:
-                    st.plotly_chart(create_alert_timeline(alerts), use_container_width=True, key="alert_timeline_chart")
+                    st.plotly_chart(create_alert_timeline(alerts), width="stretch", key="alert_timeline_chart")
                 show_cols = [c for c in ("timestamp", "region", "alert_type", "risk_level",
                                          "reason", "possible_aviation_impact", "interpretation")
                              if c in alerts.columns]
-                st.dataframe(alerts[show_cols], use_container_width=True, height=220)
+                st.dataframe(alerts[show_cols], width="stretch", height=220)
 
         st.markdown("---")
 
@@ -1454,7 +1454,7 @@ def _render_existing_main(params: dict) -> None:
             # Summary table from visualisation module
             summary_df = create_variable_summary_table(df)
             if not summary_df.empty:
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                st.dataframe(summary_df, width="stretch", hide_index=True)
 
             # Metric cards row
             cards = create_variable_card_data(df)
@@ -1476,7 +1476,7 @@ def _render_existing_main(params: dict) -> None:
             try:
                 st.plotly_chart(
                     create_variable_map_grid(df),
-                    use_container_width=True,
+                    width="stretch",
                     key="var_map_grid",
                 )
             except Exception:
@@ -1485,7 +1485,7 @@ def _render_existing_main(params: dict) -> None:
                     with st.expander(var, expanded=False):
                         st.plotly_chart(
                             create_map_plot(df, variable=var, title=var),
-                            use_container_width=True,
+                            width="stretch",
                             key=f"tab_map_{var}",
                         )
         else:
@@ -1498,7 +1498,7 @@ def _render_existing_main(params: dict) -> None:
         if var_options:
             st.plotly_chart(
                 create_multi_variable_time_series(df, normalize=normalize),
-                use_container_width=True,
+                width="stretch",
                 key="multi_ts",
             )
         else:
@@ -1517,9 +1517,9 @@ def _render_existing_main(params: dict) -> None:
             show_cols = [c for c in ("timestamp", "region", "alert_type", "risk_level",
                                      "reason", "possible_aviation_impact", "interpretation")
                          if c in alerts.columns]
-            st.dataframe(alerts[show_cols], use_container_width=True)
-            st.plotly_chart(create_alert_summary(alerts), use_container_width=True, key="adv_summary")
-            st.plotly_chart(create_alert_timeline(alerts), use_container_width=True, key="adv_timeline")
+            st.dataframe(alerts[show_cols], width="stretch")
+            st.plotly_chart(create_alert_summary(alerts), width="stretch", key="adv_summary")
+            st.plotly_chart(create_alert_timeline(alerts), width="stretch", key="adv_timeline")
 
     # ── Tab 5: Raw data ─────────────────────────────────────────────────────
     with tab_raw:
@@ -1531,7 +1531,7 @@ def _render_existing_main(params: dict) -> None:
             key="raw_var_filter",
         )
         raw_df = df[df["variable"].isin(raw_var_filter)] if raw_var_filter else df
-        st.dataframe(raw_df, use_container_width=True)
+        st.dataframe(raw_df, width="stretch")
         st.caption(f"{len(raw_df):,} row(s)")
 
         # Status metadata
@@ -1620,7 +1620,7 @@ def _render_existing_main(params: dict) -> None:
             rel_df = pd.DataFrame(
                 [{"Risk category": k, "Variables": v} for k, v in relevance_counts.items()]
             )
-            st.dataframe(rel_df, use_container_width=True, hide_index=True)
+            st.dataframe(rel_df, width="stretch", hide_index=True)
 
     # ── Tab 7: API & Cache Status ───────────────────────────────────────────
     with tab_cache:
@@ -1639,7 +1639,7 @@ def _render_existing_main(params: dict) -> None:
         with c_api2:
             st.metric("Base URL", st.session_state.api_message if st.session_state.api_connected else "—")
         with c_api3:
-            st.metric("Token configured", "Yes" if SERENE_API_TOKEN else "No")
+            st.metric("Token configured", "Yes" if config.SERENE_API_TOKEN else "No")
 
         st.markdown("---")
 
@@ -1663,7 +1663,7 @@ def _render_existing_main(params: dict) -> None:
                 cache_df["file_size"] = cache_df["file_size"].apply(
                     lambda b: f"{b/1024:.1f} KB" if b < 1024*1024 else f"{b/(1024*1024):.1f} MB"
                 )
-            st.dataframe(cache_df[show_cache_cols], use_container_width=True, height=250)
+            st.dataframe(cache_df[show_cache_cols], width="stretch", height=250)
             st.caption(f"{len(cache_maps)} cached file(s)")
         else:
             st.info("No cached maps. Cache files are created automatically when building fixed maps.")
@@ -1729,14 +1729,14 @@ def _render_live_main(params: dict) -> None:
     with tab_live_maps:
         if len(live_vars) > 1:
             st.subheader("Variable summary")
-            st.dataframe(create_variable_summary_table(map_df), use_container_width=True, hide_index=True)
+            st.dataframe(create_variable_summary_table(map_df), width="stretch", hide_index=True)
 
         st.subheader("Fixed grid maps")
         for var in live_vars:
             with st.expander(f"Map — {var}", expanded=(len(live_vars) <= 2)):
                 st.plotly_chart(
                     create_fixed_map_plot(map_df, variable=var, title=f"Fixed grid — {var}"),
-                    use_container_width=True,
+                    width="stretch",
                     key=f"live_fixed_map_{var}",
                 )
 
@@ -1756,7 +1756,7 @@ def _render_live_main(params: dict) -> None:
             with htab_map:
                 st.plotly_chart(
                     create_hazard_summary_map(hazards),
-                    use_container_width=True,
+                    width="stretch",
                     key="live_hazard_summary_map",
                 )
 
@@ -1764,7 +1764,7 @@ def _render_live_main(params: dict) -> None:
                 for var in live_vars:
                     st.plotly_chart(
                         create_spatial_gradient_map(map_df, variable=var, title=f"Spatial gradient — {var}"),
-                        use_container_width=True,
+                        width="stretch",
                         key=f"live_gradient_{var}",
                     )
 
@@ -1772,7 +1772,7 @@ def _render_live_main(params: dict) -> None:
                 for var in live_vars:
                     st.plotly_chart(
                         create_temporal_change_map(map_df, variable=var, title=f"Temporal change rate — {var}"),
-                        use_container_width=True,
+                        width="stretch",
                         key=f"live_change_{var}",
                     )
 
@@ -1782,7 +1782,7 @@ def _render_live_main(params: dict) -> None:
                                 "max_gradient", "max_change_rate", "reason")
                     if c in hazards.columns
                 ]
-                st.dataframe(hazards[show_cols], use_container_width=True, height=350)
+                st.dataframe(hazards[show_cols], width="stretch", height=350)
                 st.caption(f"{len(hazards)} hazard record(s)")
 
     # ── Tab 3: ICAO-style advisories ────────────────────────────────────────
@@ -1807,7 +1807,7 @@ def _render_live_main(params: dict) -> None:
                 )
                 if c in alerts.columns
             ]
-            st.dataframe(alerts[show_cols], use_container_width=True, height=220)
+            st.dataframe(alerts[show_cols], width="stretch", height=220)
 
             st.markdown("---")
             # Advisory cards
@@ -1857,7 +1857,7 @@ def _render_historical_main(params: dict) -> None:
 
     if summary is None:
         st.info(
-            "Configure the time window in the sidebar and click "
+            "Configure the time window in the controls and click "
             "**Run historical analysis** to begin. "
             "Use the ⚡ **Load May 2024 storm case study** button for a demo preset."
         )
@@ -1910,7 +1910,7 @@ def _render_historical_main(params: dict) -> None:
         else:
             st.plotly_chart(
                 create_historical_summary_plot(alerts_df),
-                use_container_width=True,
+                width="stretch",
                 key="hist_summary_plot",
             )
 
@@ -1927,7 +1927,7 @@ def _render_historical_main(params: dict) -> None:
         else:
             st.plotly_chart(
                 create_risk_timeline(hazards_df, title="Risk level over time"),
-                use_container_width=True,
+                width="stretch",
                 key="hist_risk_timeline",
             )
 
@@ -1939,7 +1939,7 @@ def _render_historical_main(params: dict) -> None:
         else:
             st.plotly_chart(
                 create_alert_timeline(alerts_df),
-                use_container_width=True,
+                width="stretch",
                 key="hist_timeline",
             )
 
@@ -1956,7 +1956,7 @@ def _render_historical_main(params: dict) -> None:
                 )
                 if c in hazards_df.columns
             ]
-            st.dataframe(hazards_df[show_cols], use_container_width=True, height=350)
+            st.dataframe(hazards_df[show_cols], width="stretch", height=350)
             st.caption(f"{len(hazards_df)} hazard record(s)")
 
     # ── Tab 5: Advisories ──────────────────────────────────────────────────
@@ -1973,7 +1973,7 @@ def _render_historical_main(params: dict) -> None:
                 )
                 if c in alerts_df.columns
             ]
-            st.dataframe(alerts_df[show_cols], use_container_width=True, height=250)
+            st.dataframe(alerts_df[show_cols], width="stretch", height=250)
 
             # Advisory cards
             st.markdown("---")
@@ -1983,6 +1983,308 @@ def _render_historical_main(params: dict) -> None:
                     create_advisory_card_html(row.to_dict()),
                     unsafe_allow_html=True,
                 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main page — All modes dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _render_all_sidebar() -> dict:
+    st.sidebar.markdown("# 🛩️ All Modes")
+    st.sidebar.markdown("*Unified aviation space weather dashboard*")
+    st.sidebar.markdown("---")
+    st.sidebar.caption(
+        "All major workflows are available as tabs on one page. "
+        "Use the tab controls instead of switching modes."
+    )
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Test SERENE API connection", width="stretch", key="all_test_api"):
+        _run_api_connection_test()
+    _render_shared_status()
+    st.sidebar.caption("Prototype research system — not for operational aviation decision-making.")
+    return {"mode": "all"}
+
+
+def _render_all_indices_controls() -> dict:
+    params: dict = {"mode": "indices"}
+    with st.expander("SERENE indices controls", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            start_date = st.date_input(
+                "Start date",
+                value=datetime(2024, 5, 10, tzinfo=timezone.utc).date(),
+                key="all_indices_start_date",
+            )
+        with c2:
+            start_clock = st.time_input(
+                "Start time UTC",
+                value=time(0, 0),
+                key="all_indices_start_time",
+            )
+        with c3:
+            end_date = st.date_input(
+                "End date",
+                value=datetime(2024, 5, 12, tzinfo=timezone.utc).date(),
+                key="all_indices_end_date",
+            )
+        with c4:
+            end_clock = st.time_input(
+                "End time UTC",
+                value=time(23, 59),
+                key="all_indices_end_time",
+            )
+        threshold_label = st.selectbox(
+            "Risk events threshold",
+            ["G1+ / Kp >= 5", "G2+ / Kp >= 6", "G3+ / Kp >= 7", "G4+ / Kp >= 8", "G5 only / Kp = 9"],
+            index=2,
+            key="all_indices_threshold",
+        )
+        params["start_time"] = _combine_utc(start_date, start_clock)
+        params["end_time"] = _combine_utc(end_date, end_clock)
+        params["minimum_kp"] = _min_kp_from_label(threshold_label)
+        if st.button("Load SERENE indices risk", type="primary", key="all_load_indices"):
+            _run_indices_analysis(params)
+    return params
+
+
+def _render_all_live_controls() -> dict:
+    params: dict = {"mode": "live"}
+    with st.expander("Live fixed map controls", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            params["model"] = st.selectbox("Model", ["AIDA", "TOMIRIS"], key="all_live_model")
+            show_all_live = st.checkbox(
+                "Show all variables",
+                value=False,
+                key="all_live_show_all",
+            )
+        with c2:
+            if show_all_live:
+                params["variables"] = None
+                st.caption(f"{len(st.session_state.available_variables)} variable(s)")
+            else:
+                params["variables"] = [
+                    st.selectbox(
+                        "Variable",
+                        st.session_state.available_variables,
+                        key="all_live_var",
+                    )
+                ]
+        with c3:
+            regions = list_regions()
+            params["region"] = st.selectbox(
+                "Region",
+                regions,
+                index=regions.index("uk") if "uk" in regions else 0,
+                key="all_live_region",
+            )
+            params["resolution"] = st.slider(
+                "Resolution",
+                0.5, 10.0, 10.0, 0.5,
+                key="all_live_res",
+            )
+        with c4:
+            now = datetime.now(timezone.utc)
+            params["timestamp"] = st.text_input(
+                "Timestamp UTC",
+                value=now.strftime("%Y-%m-%dT%H:%M:%S"),
+                key="all_live_ts",
+            )
+            params["use_cache"] = st.checkbox("Use cache", value=True, key="all_live_use_cache")
+            params["force_refresh"] = st.checkbox("Force refresh", value=False, key="all_live_force")
+        if st.button("Build fixed map", type="primary", key="all_build_live"):
+            _build_live_map(params)
+    return params
+
+
+def _render_all_historical_controls() -> dict:
+    if st.session_state.get("all_hist_case_study"):
+        st.session_state.all_hist_start = "2024-05-10T00:00:00"
+        st.session_state.all_hist_end = "2024-05-12T23:00:00"
+        st.session_state.all_hist_step = 12
+        st.session_state.all_hist_res = 10.0
+        st.session_state.all_hist_allow_api = False
+        st.session_state.all_hist_use_cache = True
+        st.session_state.all_hist_force = False
+        st.session_state.all_hist_case_study = False
+        st.session_state.hist_case_study_loaded = True
+
+    params: dict = {"mode": "historical"}
+    with st.expander("Historical replay controls", expanded=True):
+        if st.button("Load May 2024 storm case study", key="all_load_case"):
+            st.session_state.all_hist_case_study = True
+            st.rerun()
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            params["model"] = st.selectbox("Model", ["AIDA", "TOMIRIS"], key="all_hist_model")
+            show_all_hist = st.checkbox(
+                "Show all variables",
+                value=False,
+                key="all_hist_show_all",
+            )
+        with c2:
+            if show_all_hist:
+                params["variables"] = None
+                st.caption(f"{len(st.session_state.available_variables)} variable(s)")
+            else:
+                params["variables"] = [
+                    st.selectbox(
+                        "Variable",
+                        st.session_state.available_variables,
+                        key="all_hist_var",
+                    )
+                ]
+        with c3:
+            regions = list_regions()
+            params["region"] = st.selectbox(
+                "Region",
+                regions,
+                index=regions.index("uk") if "uk" in regions else 0,
+                key="all_hist_region",
+            )
+            params["resolution"] = st.slider(
+                "Resolution",
+                0.5, 10.0, 10.0, 0.5,
+                key="all_hist_res",
+            )
+        with c4:
+            params["start_time"] = st.text_input(
+                "Start UTC",
+                value="2024-05-10T00:00:00",
+                key="all_hist_start",
+            )
+            params["end_time"] = st.text_input(
+                "End UTC",
+                value="2024-05-12T23:00:00",
+                key="all_hist_end",
+            )
+            params["time_step"] = st.number_input(
+                "Step hours",
+                min_value=1, max_value=24, value=DEFAULT_TIME_STEP_HOURS,
+                key="all_hist_step",
+            )
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            params["use_cache"] = st.checkbox("Use cache", value=True, key="all_hist_use_cache")
+        with cc2:
+            params["force_refresh"] = st.checkbox("Force refresh", value=False, key="all_hist_force")
+        with cc3:
+            params["allow_live_api"] = st.checkbox(
+                "Allow live API requests",
+                value=False,
+                key="all_hist_allow_api",
+            )
+        if st.button("Run historical analysis", type="primary", key="all_run_hist"):
+            _run_historical(params)
+    return params
+
+
+def _render_all_existing_controls() -> dict:
+    params: dict = {"mode": "existing", "source": "api"}
+    with st.expander("Legacy API dashboard controls", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            params["model"] = st.selectbox("Model", ["AIDA", "TOMIRIS"], key="all_existing_model")
+            now = datetime.now(timezone.utc)
+            params["start_time"] = st.text_input(
+                "Start UTC",
+                value=(now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S"),
+                key="all_existing_start",
+            )
+            params["end_time"] = st.text_input(
+                "End UTC",
+                value=now.strftime("%Y-%m-%dT%H:%M:%S"),
+                key="all_existing_end",
+            )
+        with c2:
+            show_all = st.checkbox("Show all variables", value=False, key="all_existing_show_all")
+            if show_all:
+                params["variables"] = None
+            else:
+                selected_vars = st.multiselect(
+                    "Variables",
+                    st.session_state.available_variables,
+                    default=st.session_state.available_variables[:1],
+                    key="all_existing_vars",
+                )
+                params["variables"] = selected_vars or None
+        with c3:
+            lat_min = st.number_input("Lat min", value=45.0, min_value=-90.0, max_value=90.0, key="all_existing_lat_min")
+            lat_max = st.number_input("Lat max", value=60.0, min_value=-90.0, max_value=90.0, key="all_existing_lat_max")
+            lon_min = st.number_input("Lon min", value=-15.0, min_value=-180.0, max_value=180.0, key="all_existing_lon_min")
+            lon_max = st.number_input("Lon max", value=15.0, min_value=-180.0, max_value=180.0, key="all_existing_lon_max")
+            params["grid_step"] = st.slider("Grid step", 2.0, 30.0, 5.0, 1.0, key="all_existing_grid_step")
+        params["region"] = {
+            "lat_min": lat_min,
+            "lat_max": lat_max,
+            "lon_min": lon_min,
+            "lon_max": lon_max,
+        }
+        if st.button("Load / Refresh legacy data", type="primary", key="all_load_existing"):
+            _do_load(params)
+    return params
+
+
+def _render_all_system_panel() -> None:
+    st.subheader("System / API / Cache")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        api_status = "Connected" if st.session_state.api_connected else ("Disconnected" if st.session_state.api_connected is False else "Not tested")
+        st.metric("SERENE API", api_status)
+    with c2:
+        st.metric("API token", "Configured" if config.SERENE_API_TOKEN else "Missing")
+    with c3:
+        cache_stats = count_cached_maps()
+        st.metric("Cached maps", cache_stats["count"])
+    with c4:
+        st.metric("Cache size", cache_stats["readable_size"])
+
+    if st.button("Test SERENE API connection", key="all_system_test_api"):
+        _run_api_connection_test()
+
+    cache_maps = list_cached_maps()
+    if cache_maps:
+        st.dataframe(pd.DataFrame(cache_maps), width="stretch", hide_index=True)
+    else:
+        st.info("No cached maps currently available.")
+
+
+def _render_all_main(_params: dict) -> None:
+    st.title("All Modes Dashboard")
+    st.caption(
+        "One-page aviation space weather prototype: historical SERENE indices, "
+        "live fixed maps, cache-only historical replay, system status, and the legacy dashboard."
+    )
+    sections = [
+        "SERENE Indices Risk",
+        "Live Fixed Map",
+        "Historical Replay",
+        "System / API / Cache",
+        "Legacy Dashboard",
+    ]
+    selected_section = st.radio(
+        "Dashboard section",
+        sections,
+        horizontal=True,
+        key="all_section",
+    )
+
+    if selected_section == "SERENE Indices Risk":
+        indices_params = _render_all_indices_controls()
+        _render_indices_main(indices_params)
+    elif selected_section == "Live Fixed Map":
+        live_params = _render_all_live_controls()
+        _render_live_main(live_params)
+    elif selected_section == "Historical Replay":
+        hist_params = _render_all_historical_controls()
+        _render_historical_main(hist_params)
+    elif selected_section == "System / API / Cache":
+        _render_all_system_panel()
+    else:
+        existing_params = _render_all_existing_controls()
+        _render_existing_main(existing_params)
 
 
 def _empty_plot(message: str) -> object:
@@ -2004,23 +2306,33 @@ def _empty_plot(message: str) -> object:
 def _render_sidebar() -> dict:
     mode = st.sidebar.selectbox(
         "Mode",
-        ["Existing dashboard", "Live fixed map", "Historical analysis", "SERENE indices risk"],
+        [
+            "All modes dashboard",
+            "SERENE indices risk",
+            "Live fixed map",
+            "Historical analysis",
+            "Existing dashboard",
+        ],
         help="Switch between operational modes.",
     )
 
-    if mode == "Existing dashboard":
-        return _render_existing_sidebar()
-    elif mode == "Live fixed map":
-        return _render_live_sidebar()
+    if mode == "All modes dashboard":
+        return _render_all_sidebar()
     elif mode == "SERENE indices risk":
         return _render_indices_sidebar()
-    else:
+    elif mode == "Live fixed map":
+        return _render_live_sidebar()
+    elif mode == "Historical analysis":
         return _render_historical_sidebar()
+    else:
+        return _render_existing_sidebar()
 
 
 def _render_main(params: dict) -> None:
     mode = params.get("mode", "existing")
-    if mode == "existing":
+    if mode == "all":
+        _render_all_main(params)
+    elif mode == "existing":
         _render_existing_main(params)
     elif mode == "live":
         _render_live_main(params)
@@ -2037,3 +2349,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -103,6 +103,38 @@ def load_cached_map(
     return pd.DataFrame()
 
 
+def _restore_timestamp(timestamp_part: str) -> str:
+    """Restore the ISO-ish timestamp stored in a cache filename."""
+    date_part, sep, time_part = timestamp_part.partition("T")
+    if not sep:
+        return timestamp_part
+    pieces = time_part.split("-")
+    if len(pieces) < 3:
+        return timestamp_part
+    return f"{date_part}T{pieces[0]}:{pieces[1]}:{'-'.join(pieces[2:])}"
+
+
+def _split_model_variable(prefix: str) -> tuple[str, str]:
+    """Split the model/variable prefix while preserving variable underscores."""
+    try:
+        from variable_registry import get_default_variables
+
+        variables = sorted(get_default_variables(), key=len, reverse=True)
+        for variable in variables:
+            suffix = f"_{variable}"
+            if prefix.endswith(suffix):
+                model = prefix[:-len(suffix)]
+                if model:
+                    return model, variable
+    except Exception:
+        pass
+
+    model, sep, variable = prefix.partition("_")
+    if sep:
+        return model, variable
+    return prefix, ""
+
+
 def list_cached_maps() -> list[dict[str, object]]:
     """List all cached maps with metadata.
 
@@ -122,16 +154,15 @@ def list_cached_maps() -> list[dict[str, object]]:
             continue
         stem = path.stem
         parts = stem.split("_")
-        # Expected format: model_variable_timestamp_resolution_region
+        # Expected format: model_variable_timestamp_resolution_region.
+        # The variable may contain underscores, so split fixed fields from right.
         if len(parts) < 5:
             continue
         try:
             region = parts[-1]
             resolution = float(parts[-2])
-            timestamp = parts[-3].replace("-", ":")
-            # variable and model may contain underscores — rejoin
-            variable = parts[-4]
-            model = "_".join(parts[:-4])
+            timestamp = _restore_timestamp(parts[-3])
+            model, variable = _split_model_variable("_".join(parts[:-3]))
             file_size = path.stat().st_size
             results.append({
                 "model": model,

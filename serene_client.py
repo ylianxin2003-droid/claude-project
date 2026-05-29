@@ -27,12 +27,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config import (
-    SERENE_API_BASE_URL,
-    SERENE_API_TIMEOUT,
-    SERENE_API_TOKEN,
-    SERENE_AUTH_SCHEME,
-)
+import config
 
 # Max /api/calc/ calls per load (each point is one HTTP request).
 MAX_GRID_POINTS = int(os.getenv("SERENE_MAX_GRID_POINTS", "30"))
@@ -88,10 +83,10 @@ class SereneClient:
         timeout: int | None = None,
         auth_scheme: str | None = None,
     ) -> None:
-        self.base_url = (base_url or SERENE_API_BASE_URL).rstrip("/")
-        self.token = token or SERENE_API_TOKEN
-        self.timeout = timeout if timeout is not None else SERENE_API_TIMEOUT
-        self.auth_scheme = (auth_scheme or SERENE_AUTH_SCHEME).strip()
+        self.base_url = (base_url or config.SERENE_API_BASE_URL).rstrip("/")
+        self.token = token or config.SERENE_API_TOKEN
+        self.timeout = timeout if timeout is not None else config.SERENE_API_TIMEOUT
+        self.auth_scheme = (auth_scheme or config.SERENE_AUTH_SCHEME).strip()
 
         self._session = requests.Session()
         retry_strategy = Retry(
